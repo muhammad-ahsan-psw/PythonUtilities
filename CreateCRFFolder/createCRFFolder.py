@@ -313,6 +313,37 @@ def open_folder():
         save_config(last_folder=folder_path)
         os.startfile(folder_path)
 
+def copy_crf_pdf_now():
+    """Manually copy a matching CRF PDF from Downloads into the last created folder
+    (or let the user choose a folder)."""
+    _, last_folder = load_config()
+
+    target_folder = None
+
+    if last_folder and os.path.isdir(last_folder):
+        ask = messagebox.askyesno(
+            "Copy CRF PDF",
+            f"Copy matching PDF into the last created folder?\n\n{last_folder}"
+        )
+        if ask:
+            target_folder = last_folder
+
+    if not target_folder:
+        target_folder = filedialog.askdirectory(title="Select CRF Folder to copy PDF into")
+        if not target_folder:
+            return  # user cancelled
+
+    folder_name = os.path.basename(target_folder)
+
+    if copy_crf_file(folder_name, target_folder):
+        messagebox.showinfo("Success", f"CRF PDF copied into:\n{target_folder}")
+        # Remember this folder as the last one
+        save_config(last_folder=target_folder)
+    else:
+        messagebox.showwarning(
+            "Not Found",
+            f"No matching PDF found in Downloads for:\n\"{folder_name}*.pdf\""
+        )
 
 # ============================================================
 #               GUI SETUP
@@ -320,7 +351,7 @@ def open_folder():
 
 root = tk.Tk()
 root.title("Folder Structure Creator")
-root.geometry("640x430")
+root.geometry("640x450")
 root.minsize(560, 410)
 root.configure(bg=COLOR_BG)
 
@@ -364,18 +395,25 @@ browse_button.pack(side="left", padx=(8, 0))
 
 # --- Actions ---
 actions = tk.Frame(form, bg=COLOR_CARD)
-actions.pack()  # centered
+actions.pack(fill="x", pady=(12, 16))
 
 create_button = make_button(
     actions, "Check & Create Folder", check_and_create, COLOR_GREEN,
-    font_size=10, bold=True, pady=8
+    font_size=10, bold=True, pady=9
 )
-create_button.config(width=22)
-create_button.pack(side="left", padx=(0, 10))
+create_button.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
-open_button = make_button(actions, "Open Folder", open_folder, COLOR_TEAL, font_size=10, bold=True, pady=8)
-open_button.config(width=22)
-open_button.pack(side="left", padx=(10, 0))
+open_button = make_button(
+    actions, "Open Folder", open_folder, COLOR_TEAL,
+    font_size=10, bold=True, pady=9
+)
+open_button.pack(side="left", expand=True, fill="x", padx=6)
+
+copy_button = make_button(
+    actions, "Copy CRF PDF", copy_crf_pdf_now, COLOR_ACCENT,
+    font_size=10, bold=True, pady=9
+)
+copy_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
 # --- Footer tip pinned to the bottom ---
 hint_label = tk.Label(
