@@ -132,7 +132,8 @@ def empty_sql_files():
 
     confirm = messagebox.askyesno(
         "Confirm",
-        f"Empty ALL .sql files in:\n\n{folder}\n\nThis cannot be undone."
+        f"Empty ALL .sql files in:\n\n{folder}\n\n"
+        f"(including all subfolders)\n\nThis cannot be undone."
     )
 
     if not confirm:
@@ -141,15 +142,17 @@ def empty_sql_files():
     count = 0
     errors = []
 
-    for filename in os.listdir(folder):
-        if filename.lower().endswith(".sql"):
-            file_path = os.path.join(folder, filename)
-            try:
-                with open(file_path, "w"):
-                    pass
-                count += 1
-            except Exception as e:
-                errors.append(f"{filename}: {str(e)}")
+    # Walk through the folder and all subfolders
+    for root_dir, dirs, files in os.walk(folder):
+        for filename in files:
+            if filename.lower().endswith(".sql"):
+                file_path = os.path.join(root_dir, filename)
+                try:
+                    with open(file_path, "w"):
+                        pass
+                    count += 1
+                except Exception as e:
+                    errors.append(f"{file_path}: {str(e)}")
 
     result = f"Successfully emptied {count} .sql file(s)."
 
@@ -197,7 +200,7 @@ empty_button.pack()  # no fill: stays small and centered
 # --- Footer warning pinned to the bottom ---
 hint_label = tk.Label(
     form,
-    text="Empties every .sql file directly inside the folder (subfolders are not touched). This cannot be undone.",
+    text="Empties every .sql file in the folder and all subfolders. This cannot be undone.",
     font=(FONT, 9),
     bg="#fef2f2",
     fg="#991b1b",
