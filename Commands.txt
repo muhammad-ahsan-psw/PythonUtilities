@@ -1,0 +1,20 @@
+Goto folder
+cd D:\Code\Python\CreateLiveIssueFolder
+cd D:\Code\Python\CreateCRFFolder
+
+Compile and Create exe file
+pyinstaller --onefile --noconsole createCRFFolder.py   
+pyinstaller --onefile createCRFFolder.py   
+
+pyinstaller --onefile --icon=RTM.ico --add-data "RTM.png:." --noconsole RTMSheetPopulator.py
+
+pyinstaller --onefile --noconsole --clean --icon CreateSPFiles.ico --add-data "CreateSPFiles.png;." CreateSPFiles.py
+
+**For icon creation**
+- update image and icon names in the iconGenerator.py file
+- py iconGenerator.py
+
+**After icon created**
+pyinstaller --clean createCRFFolder.spec
+pyinstaller --clean SITDeployer.spec
+pyinstaller --clean CreateSPFiles.spec

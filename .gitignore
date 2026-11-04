@@ -239,3 +239,4 @@ output/
 # PyInstaller build artifacts
 **/build/
 **/dist/
+**/.history

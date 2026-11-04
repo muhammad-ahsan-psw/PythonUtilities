@@ -1,0 +1,2 @@
+PARENT_DIR=D:/Documents/Live Issues - Compiled/2026/6-Jun-2026
+LAST_FILE=D:/Documents/Live Issues - Compiled/2026/6-Jun-2026\Ticket No 20260701-PSW-00156 KPPE-SB-309212-27-06-2026\Scripts.sql
