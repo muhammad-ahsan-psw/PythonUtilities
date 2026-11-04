@@ -1,12 +1,12 @@
 import sys
 import re
 import uuid
+import base64
 from pathlib import Path
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
 from PySide6.QtPdf import QPdfDocument
+from PySide6.QtCore import QUrl, Qt, QSize, QMarginsF, QSizeF
 
-from PySide6.QtCore import Qt, QSize, QMarginsF
 from PySide6.QtGui import (
     QAction,
     QTextCharFormat,
@@ -16,7 +16,11 @@ from PySide6.QtGui import (
     QTextListFormat,
     QFont,
     QPageSize,
-    QPageLayout
+    QPageLayout,
+    QTextLength, 
+    QTextTable,
+    QTextOption,
+    QImage
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +42,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QAbstractItemView,
+    QFrame
 )
 from PySide6.QtPrintSupport import QPrinter
 
@@ -45,6 +50,86 @@ from PySide6.QtPrintSupport import QPrinter
 APP_TITLE = "CRF PDF Generator"
 CRF_PATTERN = re.compile(r"\bECRF-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\b", re.IGNORECASE)
 CRF_ROOT = Path(r"D:\Documents\CRFs")
+
+# ============================================================
+#               THEME (matches Live Issue Folder tool)
+# ============================================================
+FONT = "Segoe UI"
+COLOR_BG = "#eef1f5"
+COLOR_CARD = "#ffffff"
+COLOR_HEADER = "#1f2d3d"
+COLOR_TEXT = "#1f2d3d"
+COLOR_MUTED = "#6b7280"
+COLOR_BORDER = "#cbd5e1"
+COLOR_ACCENT = "#2563eb"
+COLOR_GREEN = "#16a34a"
+COLOR_TEAL = "#0d9488"
+COLOR_PURPLE = "#7c3aed"
+COLOR_ORANGE = "#ea580c"
+
+
+def darken(hex_color, factor=0.88):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return "#{:02x}{:02x}{:02x}".format(int(r * factor), int(g * factor), int(b * factor))
+
+
+def style_button(btn, bg, bold=False, size=10, padding="8px 18px"):
+    """Flat button with hover and disabled states."""
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setStyleSheet(
+        f"QPushButton {{ background: {bg}; color: white; border: none; padding: {padding};"
+        f" font-weight: {'bold' if bold else 'normal'}; font-size: {size}pt; }}"
+        f"QPushButton:hover {{ background: {darken(bg)}; }}"
+        f"QPushButton:disabled {{ background: #9ca3af; }}"
+    )
+
+
+def field_label(text):
+    label = QLabel(text)
+    label.setObjectName("fieldLabel")
+    return label
+
+
+APP_STYLE = f"""
+QMainWindow, QDialog {{ background: {COLOR_BG}; }}
+QLabel, QLineEdit, QPushButton, QToolButton, QSpinBox, QStatusBar {{
+    font-family: "{FONT}"; font-size: 10pt; color: {COLOR_TEXT};
+}}
+QLabel {{ background: transparent; }}
+QLabel#fieldLabel {{ font-weight: bold; }}
+QLabel#cardHeader {{
+    background: {COLOR_HEADER}; color: white; font-size: 11pt; font-weight: bold;
+    padding: 11px 16px;
+}}
+QFrame#card {{ background: {COLOR_CARD}; border: 1px solid {COLOR_BORDER}; }}
+QLineEdit, QSpinBox {{
+    background: #ffffff; border: 1px solid {COLOR_BORDER}; padding: 5px 6px;
+}}
+QLineEdit:focus, QSpinBox:focus {{ border: 1px solid {COLOR_ACCENT}; }}
+QTextEdit {{
+    background: #fafbfc; border: 1px solid {COLOR_BORDER}; padding: 8px;
+    selection-background-color: #bfdbfe; selection-color: {COLOR_TEXT};
+}}
+QTextEdit:focus {{ border: 1px solid {COLOR_ACCENT}; }}
+QToolBar {{
+    background: {COLOR_CARD}; border: none; border-bottom: 1px solid {COLOR_BORDER};
+    spacing: 4px; padding: 4px 12px;
+}}
+QToolButton {{ background: transparent; border: none; padding: 5px 10px; }}
+QToolButton:hover {{ background: #e5e9f0; }}
+QToolButton:checked {{ background: #dbeafe; color: {COLOR_ACCENT}; }}
+QPushButton {{ background: {COLOR_ACCENT}; color: white; border: none; padding: 8px 16px; }}
+QPushButton:hover {{ background: {darken(COLOR_ACCENT)}; }}
+QPushButton:disabled {{ background: #9ca3af; }}
+QTableWidget {{
+    background: #ffffff; border: 1px solid {COLOR_BORDER}; gridline-color: {COLOR_BORDER};
+}}
+QHeaderView::section {{
+    background: {COLOR_HEADER}; color: white; border: none; padding: 6px; font-weight: bold;
+}}
+QStatusBar {{ background: {COLOR_CARD}; color: {COLOR_MUTED}; border-top: 1px solid {COLOR_BORDER}; }}
+"""
 
 class TableDialog(QDialog):
     def __init__(self, parent=None):
@@ -168,23 +253,7 @@ class RichTextEditor(QTextEdit):
 
     def insertFromMimeData(self, source):
         if source.hasHtml():
-            raw_html = source.html()
-
-            try:
-                debug_dir = Path.home() / "Documents" / "PasteDebug"
-                debug_dir.mkdir(parents=True, exist_ok=True)
-                (debug_dir / "raw_paste.html").write_text(raw_html, encoding="utf-8")
-            except Exception:
-                pass
-
-            cleaned = self.sanitize_pasted_html(raw_html)
-
-            try:
-                (debug_dir / "cleaned_paste.html").write_text(cleaned, encoding="utf-8")
-            except Exception:
-                pass
-
-            self.insertHtml(cleaned)
+            self.insertHtml(self.sanitize_pasted_html(source.html()))
         elif source.hasText():
             self.insertPlainText(source.text())
         else:
@@ -211,6 +280,15 @@ class RichTextEditor(QTextEdit):
                     continue
                 if re.match(r"^(width|height)\s*:", d, re.IGNORECASE):
                     continue
+                # Outlook's resets: Qt reads these as "make it normal/zero"
+                if re.match(r"^font\s*:\s*inherit$", d, re.IGNORECASE):
+                    continue                      # was cancelling <b>
+                if re.match(r"^padding\s*:", d, re.IGNORECASE):
+                    continue                      # let cellpadding apply
+                if re.match(r"^font-weight\s*:\s*(400|normal)$", d, re.IGNORECASE):
+                    continue                      # lets <b> win
+                if re.match(r"^margin\s*:\s*0(px)?$", d, re.IGNORECASE):
+                    d = "margin-top:0px; margin-bottom:10px"
                 # Drop ALL border-related declarations here — Qt mishandles
                 # Outlook's per-side longhand/shorthand border CSS. We add
                 # our own simple, explicit borders further below instead.
@@ -245,6 +323,8 @@ class RichTextEditor(QTextEdit):
             return tag[:-1] + ' style="border:1px solid black;">'
 
         html = re.sub(r"<t[dh]\b[^>]*>", add_cell_border, html, flags=re.IGNORECASE)
+        # Space after tables (Qt adds none)
+        html = re.sub(r"</table>", '</table><p style="margin:0px">&nbsp;</p>', html, flags=re.IGNORECASE)
 
         return html
 
@@ -305,6 +385,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1000, 750)
+        self.setMinimumSize(800, 600)
 
         self.last_output_dir = str(Path.home() / "Documents")
         self._output_manually_edited = False
@@ -312,42 +393,62 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(14, 14, 14, 14)
+
+        # Card: dark header, toolbar, then the body
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        outer.addWidget(card)
+
+        header = QLabel(APP_TITLE)
+        header.setObjectName("cardHeader")
+        card_layout.addWidget(header)
+
+        self.toolbar = QToolBar("Formatting")
+        self.toolbar.setIconSize(QSize(18, 18))
+        self.toolbar.setMovable(False)
+        card_layout.addWidget(self.toolbar)
+        self.setup_toolbar()
+
+        body = QWidget()
+        main_layout = QVBoxLayout(body)
+        main_layout.setContentsMargins(18, 14, 18, 14)
+        main_layout.setSpacing(10)
+        card_layout.addWidget(body, 1)
 
         # Document information
         form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
 
         self.crf_number = QLineEdit()
         self.crf_number.setPlaceholderText("Auto-detected from content, or enter manually")
-        form.addRow("CRF Number:", self.crf_number)
+        form.addRow(field_label("CRF Number"), self.crf_number)
 
         self.title = QLineEdit()
         self.title.setPlaceholderText("Optional document title")
-        form.addRow("Document Title:", self.title)
+        form.addRow(field_label("Document Title"), self.title)
 
         main_layout.addLayout(form)
 
-        # Toolbar
-        self.toolbar = QToolBar("Formatting")
-        self.toolbar.setIconSize(QSize(18, 18))
-        self.addToolBar(self.toolbar)
-
-        self.setup_toolbar()
-
         # Editor
         self.editor = RichTextEditor()
-        main_layout.addWidget(self.editor)
+        main_layout.addWidget(self.editor, 1)
 
         # Output
         output_layout = QHBoxLayout()
-
-        output_layout.addWidget(QLabel("Output PDF:"))
+        output_layout.addWidget(field_label("Output PDF"))
 
         self.output_path = QLineEdit()
         self.output_path.setPlaceholderText("PDF filename will be based on the CRF number")
         output_layout.addWidget(self.output_path)
 
         browse = QPushButton("Browse")
+        style_button(browse, COLOR_ACCENT, padding="6px 14px")
         browse.clicked.connect(self.browse_output)
         output_layout.addWidget(browse)
 
@@ -357,23 +458,25 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
 
         load_button = QPushButton("Load PDF")
-        load_button.setMinimumHeight(38)
+        style_button(load_button, COLOR_PURPLE)
         load_button.clicked.connect(self.load_pdf)
         buttons.addWidget(load_button)
 
         buttons.addStretch()
 
         clear_button = QPushButton("Clear")
+        style_button(clear_button, COLOR_ORANGE)
         clear_button.clicked.connect(self.clear_document)
         buttons.addWidget(clear_button)
 
         generate_button = QPushButton("Generate PDF")
-        generate_button.setMinimumHeight(38)
+        # style_button(generate_button, COLOR_GREEN, bold=True, size=12, padding="10px 24px")
+        style_button(generate_button, COLOR_GREEN, bold=True)
         generate_button.clicked.connect(self.generate_pdf)
         buttons.addWidget(generate_button)
 
         self.open_button = QPushButton("Open PDF")
-        self.open_button.setMinimumHeight(38)
+        style_button(self.open_button, COLOR_TEAL)
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.open_generated_pdf)
         buttons.addWidget(self.open_button)
@@ -655,9 +758,9 @@ class MainWindow(QMainWindow):
             self.open_button.setEnabled(False)
 
     @staticmethod
-    def fit_images_to_page(doc, max_width=670):
+    def fit_images_to_page(doc, max_width=670, max_height=950):
         for block in _iter_blocks(doc):
-           for it in block:
+            for it in block:
                 frag = it.fragment()
                 fmt = frag.charFormat()
                 if not frag.isValid() or not fmt.isImageFormat():
@@ -666,22 +769,66 @@ class MainWindow(QMainWindow):
                 w, h = img_fmt.width(), img_fmt.height()
 
                 if w <= 0 or h <= 0:
-                    res = doc.resource(
-                        QTextDocument.ResourceType.ImageResource,
-                        QUrl(img_fmt.name()),
-                    )
-                    if res is None or res.isNull():
-                        continue
-                    w, h = res.width(), res.height()
+                    w, h = MainWindow._image_size(doc, img_fmt.name())
 
-                if w > max_width:
+                if w <= 0 or h <= 0:
+                    # Size unknown: force it to the page width; Qt keeps the aspect ratio
                     img_fmt.setWidth(max_width)
-                    img_fmt.setHeight(h * max_width / w)
+                else:
+                    scale = min(1.0, max_width / w, max_height / h)
+                    if scale >= 1.0:
+                        continue
+                    img_fmt.setWidth(w * scale)
+                    img_fmt.setHeight(h * scale)
+
+                cur = QTextCursor(doc)
+                cur.setPosition(frag.position())
+                cur.setPosition(frag.position() + frag.length(),
+                                QTextCursor.MoveMode.KeepAnchor)
+                cur.setCharFormat(img_fmt)
+
+                # Shrink to fit BOTH page width and page height
+                scale = min(1.0, max_width / w, max_height / h)
+                if scale < 1.0:
+                    img_fmt.setWidth(w * scale)
+                    img_fmt.setHeight(h * scale)
                     cur = QTextCursor(doc)
                     cur.setPosition(frag.position())
                     cur.setPosition(frag.position() + frag.length(),
                                     QTextCursor.MoveMode.KeepAnchor)
                     cur.setCharFormat(img_fmt)
+    
+    @staticmethod
+    def _image_size(doc, name):
+        """Find a pasted image's real size from a data: URI, a file path, or a document resource."""
+        img = QImage()
+        try:
+            if name.startswith("data:"):
+                img = QImage.fromData(base64.b64decode(name.split(",", 1)[1]))
+            else:
+                path = QUrl(name).toLocalFile() if name.startswith("file:") else name
+                img = QImage(path)
+                if img.isNull():
+                    res = doc.resource(QTextDocument.ResourceType.ImageResource, QUrl(name))
+                    if isinstance(res, QImage):
+                        img = res
+        except Exception:
+            pass
+        return (img.width(), img.height()) if not img.isNull() else (0, 0)
+    
+    @staticmethod
+    def fit_tables_to_page(doc):
+        """Make every (nested) table 100% of the available width with auto columns."""
+        def walk(frame):
+            for child in frame.childFrames():
+                if isinstance(child, QTextTable):
+                    fmt = child.format()
+                    fmt.setWidth(QTextLength(QTextLength.Type.PercentageLength, 100))
+                    fmt.setColumnWidthConstraints([])
+                    child.setFormat(fmt)
+                walk(child)
+
+        walk(doc.rootFrame())
 
     @staticmethod
     def safe_filename(name):
@@ -800,7 +947,17 @@ class MainWindow(QMainWindow):
 
             # Keep the editor's rich document as the source so text, formatting,
             # images and tables remain in their original sequence.
+            # Wrap long unbroken strings (URLs, SP names) instead of running off the page
+            opt = doc.defaultTextOption()
+            opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            doc.setDefaultTextOption(opt)
+
+            self.fit_tables_to_page(doc)
             self.fit_images_to_page(doc)
+            # Size the document to the printable area so the 15 mm margins are the real margins
+            doc.documentLayout().setPaintDevice(printer)
+            doc.setPageSize(QSizeF(printer.pageRect(QPrinter.Unit.DevicePixel).size()))
+            doc.setDocumentMargin(0)
             doc.print_(printer)
 
             self.output_path.setText(str(output_path))
@@ -840,11 +997,14 @@ def _iter_blocks(doc):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
-
+    app.setStyle("Fusion")        # makes stylesheets render consistently
+    app.setStyleSheet(APP_STYLE)
+    
     window = MainWindow()
     window.show()
 
     sys.exit(app.exec())
+
 
 
 if __name__ == "__main__":
