@@ -712,10 +712,20 @@ class SPFileGenerator:
     def open_url_generator(self):
         win = tk.Toplevel(self.root)
         win.title("Generate SP URLs")
-        win.geometry("900x660")
-        win.minsize(700, 520)
+        win.geometry("900x700")
+        win.minsize(700, 560)
         win.configure(bg=COLOR_BG)
         win.transient(self.root)
+
+        def _crf_folder_name():
+            """Derive CRF folder basename from Output SIT Folder (…/ECRF-xxx-…/SIT Scripts)."""
+            sit = self.sit_folder_var.get().strip()
+            if not sit:
+                return ""
+            parent = os.path.dirname(sit)
+            if os.path.basename(sit).lower() == "sit scripts" and parent:
+                return os.path.basename(parent)
+            return ""
 
         card = make_card(win, "Generate SP URLs")
         card.pack(fill="both", expand=True, padx=14, pady=14)
@@ -737,6 +747,27 @@ class SPFileGenerator:
         if self.sample_urls:
             url_combo.set(self.sample_urls[0])  # pre-select most recent
 
+        # ---- Scripts (DeploymentQueries) URL options ----
+        scripts_row = tk.Frame(body, bg=COLOR_CARD)
+        scripts_row.pack(fill="x", pady=(12, 0))
+        scripts_row.columnconfigure(2, weight=1)
+
+        include_scripts_var = tk.BooleanVar(value=True)
+        crf_name_var = tk.StringVar(value=_crf_folder_name() or self.crf_var.get().strip())
+
+        def on_scripts_toggle():
+            crf_name_entry.config(state="normal" if include_scripts_var.get() else "disabled")
+
+        make_check(
+            scripts_row,
+            "Include Scripts URL (DeploymentQueries)",
+            include_scripts_var,
+            command=on_scripts_toggle,
+        ).grid(row=0, column=0, sticky="w")
+        make_field_label(scripts_row, "CRF Name").grid(row=0, column=1, sticky="w", padx=(18, 8))
+        crf_name_entry = make_entry(scripts_row, textvariable=crf_name_var)
+        crf_name_entry.grid(row=0, column=2, sticky="ew", ipady=4)
+
         make_field_label(body, "SP list (one per line, or comma separated)").pack(fill="x", pady=(14, 4))
         sp_box = make_code_box(body, height=10, wrap=tk.NONE)
         sp_box.pack(fill="both", expand=True)
@@ -744,16 +775,6 @@ class SPFileGenerator:
         make_field_label(body, "Generated URLs").pack(fill="x", pady=(14, 4))
         out_box = make_code_box(body, height=10, wrap=tk.NONE)
         out_box.pack(fill="both", expand=True)
-
-        def _crf_folder_name():
-            """Derive CRF folder basename from Output SIT Folder (…/ECRF-xxx-…/SIT Scripts)."""
-            sit = self.sit_folder_var.get().strip()
-            if not sit:
-                return ""
-            parent = os.path.dirname(sit)
-            if os.path.basename(sit).lower() == "sit scripts" and parent:
-                return os.path.basename(parent)
-            return ""
 
         def run():
             try:
@@ -764,14 +785,22 @@ class SPFileGenerator:
                 return
 
             lines = []
-            # Scripts / DeploymentQueries URL (uses CRF Number from main window)
-            scripts_url = build_scripts_url(
-                sample,
-                self.crf_var.get().strip(),
-                _crf_folder_name(),
-            )
-            if scripts_url:
-                lines.append(scripts_url)
+            if include_scripts_var.get():
+                # Scripts / DeploymentQueries URL (CRF Number from main window, CRF Name from this dialog)
+                scripts_url = build_scripts_url(
+                    sample,
+                    self.crf_var.get().strip(),
+                    crf_name_var.get().strip(),
+                )
+                if scripts_url:
+                    lines.append(scripts_url)
+                else:
+                    messagebox.showwarning(
+                        "Scripts URL Skipped",
+                        "Could not build the Scripts URL. Make sure the CRF Number is filled in "
+                        "on the main window and the sample URL contains /blob/master/.",
+                        parent=win,
+                    )
             lines.extend(urls)
 
             self._set_text(out_box, "\n".join(lines))
