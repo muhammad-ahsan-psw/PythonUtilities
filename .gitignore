@@ -235,3 +235,7 @@ Desktop.ini
 # Application-specific generated files
 logs/
 output/
+
+# PyInstaller build artifacts
+**/build/
+**/dist/
