@@ -42,6 +42,152 @@ CONFIRM_ABOVE = 30             # ask before opening more tabs than this
 WARMUP_MS = 1500
 NEXT_LAUNCH_DELAY_MS = 800
 
+# ============================================================
+#               THEME (shared with SP File Generator)
+# ============================================================
+FONT = "Segoe UI"
+COLOR_BG = "#eef1f5"
+COLOR_CARD = "#ffffff"
+COLOR_HEADER = "#1f2d3d"
+COLOR_TEXT = "#1f2d3d"
+COLOR_MUTED = "#6b7280"
+COLOR_BORDER = "#cbd5e1"
+COLOR_ACCENT = "#2563eb"
+COLOR_GREEN = "#16a34a"
+COLOR_TEAL = "#0d9488"
+COLOR_PURPLE = "#7c3aed"
+COLOR_ORANGE = "#ea580c"
+COLOR_RED = "#dc2626"
+LABEL_FONT = (FONT, 10)
+
+
+def _darken(hex_color, factor=0.88):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return "#{:02x}{:02x}{:02x}".format(int(r * factor), int(g * factor), int(b * factor))
+
+
+def make_button(parent, text, command, bg, font_size=10, bold=False, pady=8, padx=14):
+    """Flat button with a hover effect."""
+    hover = _darken(bg)
+    btn = tk.Button(
+        parent,
+        text=text,
+        command=command,
+        font=(FONT, font_size, "bold" if bold else "normal"),
+        bg=bg,
+        fg="white",
+        activebackground=hover,
+        activeforeground="white",
+        disabledforeground="#e5e7eb",
+        relief="flat",
+        bd=0,
+        padx=padx,
+        pady=pady,
+        cursor="hand2",
+    )
+    btn.bind("<Enter>", lambda e: btn.config(bg=hover))
+    btn.bind("<Leave>", lambda e: btn.config(bg=bg))
+    return btn
+
+
+def make_entry(parent, **kwargs):
+    return tk.Entry(
+        parent,
+        font=LABEL_FONT,
+        bg="#ffffff",
+        fg=COLOR_TEXT,
+        relief="flat",
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=COLOR_BORDER,
+        highlightcolor=COLOR_ACCENT,
+        insertbackground=COLOR_TEXT,
+        **kwargs
+    )
+
+
+def make_field_label(parent, text, bold=True, size=10, fg=COLOR_TEXT, bg=COLOR_CARD):
+    return tk.Label(
+        parent,
+        text=text,
+        font=(FONT, size, "bold" if bold else "normal"),
+        bg=bg,
+        fg=fg,
+        anchor="w",
+    )
+
+
+def make_hint(parent, text):
+    return tk.Label(parent, text=text, font=(FONT, 9), bg=COLOR_CARD, fg=COLOR_MUTED, anchor="w")
+
+
+def make_check(parent, text, variable, command=None, fg=COLOR_TEXT):
+    return tk.Checkbutton(
+        parent,
+        text=text,
+        variable=variable,
+        command=command,
+        font=(FONT, 10),
+        bg=COLOR_CARD,
+        fg=fg,
+        activebackground=COLOR_CARD,
+        selectcolor="#ffffff",
+        anchor="w",
+    )
+
+
+def make_card(parent, title):
+    card = tk.Frame(parent, bg=COLOR_CARD, highlightthickness=1, highlightbackground=COLOR_BORDER)
+    tk.Label(
+        card,
+        text=title,
+        font=(FONT, 11, "bold"),
+        bg=COLOR_HEADER,
+        fg="white",
+        anchor="w",
+        padx=16,
+        pady=11,
+    ).pack(fill="x")
+    return card
+
+
+def make_code_box(parent, **kwargs):
+    return ScrolledText(
+        parent,
+        font=("Consolas", 10),
+        bg="#fafbfc",
+        fg=COLOR_TEXT,
+        relief="flat",
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=COLOR_BORDER,
+        highlightcolor=COLOR_ACCENT,
+        insertbackground=COLOR_TEXT,
+        selectbackground="#bfdbfe",
+        padx=8,
+        pady=8,
+        **kwargs
+    )
+
+
+def apply_ttk_theme():
+    """Style the ttk widgets (Combobox) to match."""
+    style = ttk.Style()
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure(
+        "TCombobox",
+        padding=5,
+        fieldbackground="#ffffff",
+        bordercolor=COLOR_BORDER,
+        lightcolor=COLOR_BORDER,
+        darkcolor=COLOR_BORDER,
+        arrowcolor=COLOR_MUTED,
+    )
+
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
@@ -260,7 +406,10 @@ class App:
         self._excluded = 0
 
         root.title(APP_TITLE)
-        self._center(root, 900, 660)
+        root.minsize(900, 640)
+        root.configure(bg=COLOR_BG)
+        apply_ttk_theme()
+        self._center(root, 1000, 760)
 
         self.bc_var = tk.StringVar(value=self.cfg["beyond_compare_path"])
         self.profile_var = tk.StringVar(value=self.cfg["ftp_profile"])
@@ -282,129 +431,131 @@ class App:
 
     # ---- layout ----------------------------------------------------------
     def _build_ui(self):
-        frm = tk.Frame(self.root)
-        frm.pack(fill="both", expand=True, padx=10, pady=10)
-        frm.columnconfigure(1, weight=1)
-        # frm.columnconfigure(3, weight=0)
-        frm.rowconfigure(9, weight=1)
+        # ---------- Top card: settings ----------
+        card = make_card(self.root, "Compare Settings")
+        card.pack(fill="x", padx=14, pady=(14, 8))
 
-        label_font = ("Calibri", 11)
+        frm = tk.Frame(card, bg=COLOR_CARD)
+        frm.pack(fill="x", padx=18, pady=14)
+        frm.columnconfigure(1, weight=1)
+        frm.columnconfigure(2, minsize=190)  # keeps the right-hand buttons/hints the same width
 
         # Beyond Compare path
-        tk.Label(frm, text="Beyond Compare:", font=label_font).grid(row=0, column=0, sticky="w", pady=4)
-        ent_bc = tk.Entry(frm, textvariable=self.bc_var, font=label_font)
-        ent_bc.grid(row=0, column=1, sticky="ew", padx=5)
+        make_field_label(frm, "Beyond Compare").grid(row=0, column=0, sticky="w", padx=(0, 14), pady=5)
+        ent_bc = make_entry(frm, textvariable=self.bc_var)
+        ent_bc.grid(row=0, column=1, sticky="ew", pady=5, ipady=5)
         ent_bc.bind("<FocusOut>", lambda e: self.save_settings())
         ent_bc.bind("<Return>", lambda e: self.save_settings())
-        tk.Button(frm, text="Browse", command=self.browse_bc, bg="#1E7B34", fg="white", activebackground="#17632A", activeforeground="white").grid(row=0, column=2, sticky="ew")
+        make_button(frm, "Browse", self.browse_bc, COLOR_ACCENT, pady=6).grid(
+            row=0, column=2, sticky="ew", padx=(10, 0), pady=5
+        )
+
         # FTP profile
-        tk.Label(frm, text="FTP Profile:", font=label_font).grid(row=1, column=0, sticky="w", pady=4)
-        ent_profile = tk.Entry(frm, textvariable=self.profile_var, font=label_font)
-        ent_profile.grid(row=1, column=1, sticky="ew", padx=5)
+        make_field_label(frm, "FTP Profile").grid(row=1, column=0, sticky="w", padx=(0, 14), pady=5)
+        ent_profile = make_entry(frm, textvariable=self.profile_var)
+        ent_profile.grid(row=1, column=1, sticky="ew", pady=5, ipady=5)
         ent_profile.bind("<FocusOut>", lambda e: self.save_settings())
         ent_profile.bind("<Return>", lambda e: self.save_settings())
 
         # Recent projects
-        tk.Label(frm, text="Recent Projects:", font=label_font).grid(row=2, column=0, sticky="nw", pady=4)
-        list_frame = tk.Frame(frm)
-        list_frame.grid(row=2, column=1, sticky="ew", padx=5, pady=4)
+        make_field_label(frm, "Recent Projects").grid(row=2, column=0, sticky="nw", padx=(0, 14), pady=5)
+        list_frame = tk.Frame(frm, bg=COLOR_CARD)
+        list_frame.grid(row=2, column=1, sticky="ew", pady=5)
         list_frame.columnconfigure(0, weight=1)
 
-        self.listbox = tk.Listbox(list_frame, height=6, font=("Consolas", 10), exportselection=False)
+        self.listbox = tk.Listbox(
+            list_frame,
+            height=6,
+            font=("Consolas", 10),
+            exportselection=False,
+            bg="#fafbfc",
+            fg=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_ACCENT,
+            selectbackground="#bfdbfe",
+            selectforeground=COLOR_TEXT,
+            activestyle="none",
+        )
         self.listbox.grid(row=0, column=0, sticky="ew")
-        scroll = tk.Scrollbar(list_frame, command=self.listbox.yview)
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.listbox.config(yscrollcommand=scroll.set)
         self.listbox.bind("<<ListboxSelect>>", self.on_list_select)
 
-        tk.Button(frm, text="Remove", command=self.remove_selected, bg="#A71D2A", fg="white", activebackground="#8B1722", activeforeground="white").grid(row=2, column=2, sticky="new", pady=4)
+        make_button(frm, "Remove", self.remove_selected, COLOR_RED, pady=6).grid(
+            row=2, column=2, sticky="new", padx=(10, 0), pady=5
+        )
 
         # Project folder
-        tk.Label(frm, text="Project Folder:", font=label_font).grid(row=3, column=0, sticky="w", pady=4)
-        tk.Entry(frm, textvariable=self.project_var, font=label_font).grid(row=3, column=1, sticky="ew", padx=5)
-        tk.Button(frm, text="Browse", command=self.browse_project, bg="#1E7B34", fg="white", activebackground="#17632A", activeforeground="white").grid(row=3, column=2, sticky="ew")
+        make_field_label(frm, "Project Folder").grid(row=3, column=0, sticky="w", padx=(0, 14), pady=5)
+        make_entry(frm, textvariable=self.project_var).grid(row=3, column=1, sticky="ew", pady=5, ipady=5)
+        make_button(frm, "Browse", self.browse_project, COLOR_ACCENT, pady=6).grid(
+            row=3, column=2, sticky="ew", padx=(10, 0), pady=5
+        )
 
         # Remote folder (pick from previously used ones, or type a custom one)
-        tk.Label(frm, text="Remote Folder:", font=label_font).grid(row=4, column=0, sticky="w", pady=4)
+        make_field_label(frm, "Remote Folder").grid(row=4, column=0, sticky="w", padx=(0, 14), pady=5)
         self.remote_combo = ttk.Combobox(
-            frm, textvariable=self.remote_var, font=label_font, values=self.cfg["remote_folders"]
+            frm, textvariable=self.remote_var, font=LABEL_FONT, values=self.cfg["remote_folders"]
         )
-        self.remote_combo.grid(row=4, column=1, sticky="ew", padx=5)
+        self.remote_combo.grid(row=4, column=1, sticky="ew", pady=5, ipady=3)
         self.remote_combo.bind("<<ComboboxSelected>>", lambda e: self.save_remote_folder())
         self.remote_combo.bind("<FocusOut>", lambda e: self.save_remote_folder())
         self.remote_combo.bind("<Return>", lambda e: self.save_remote_folder())
-        tk.Label(frm, text="e.g. Projects/PCS", font=("Calibri", 9), fg="gray40").grid(row=4, column=2, sticky="w")
+        make_hint(frm, "e.g. Projects/PCS").grid(row=4, column=2, sticky="w", padx=(10, 0))
 
         # Excluded file types
-        tk.Label(frm, text="Exclude Types:", font=label_font).grid(row=5, column=0, sticky="w", pady=4)
-        ent_exclude = tk.Entry(frm, textvariable=self.exclude_var, font=label_font)
-        ent_exclude.grid(row=5, column=1, sticky="ew", padx=5)
+        make_field_label(frm, "Exclude Types").grid(row=5, column=0, sticky="w", padx=(0, 14), pady=5)
+        ent_exclude = make_entry(frm, textvariable=self.exclude_var)
+        ent_exclude.grid(row=5, column=1, sticky="ew", pady=5, ipady=5)
         ent_exclude.bind("<FocusOut>", lambda e: self.save_settings())
         ent_exclude.bind("<Return>", lambda e: self.save_settings())
-        tk.Label(frm, text="e.g. .dll; .pdb; Web.config", font=("Calibri", 9), fg="gray40").grid(row=5, column=2, sticky="w")
+        make_hint(frm, "e.g. .dll; .pdb; Web.config").grid(row=5, column=2, sticky="w", padx=(10, 0))
 
         # Excluded specific files
-        tk.Label(frm, text="Exclude Files:", font=label_font).grid(row=6, column=0, sticky="w", pady=4)
-        ent_exclude_files = tk.Entry(frm, textvariable=self.exclude_files_var, font=label_font)
-        ent_exclude_files.grid(row=6, column=1, sticky="ew", padx=5)
+        make_field_label(frm, "Exclude Files").grid(row=6, column=0, sticky="w", padx=(0, 14), pady=5)
+        ent_exclude_files = make_entry(frm, textvariable=self.exclude_files_var)
+        ent_exclude_files.grid(row=6, column=1, sticky="ew", pady=5, ipady=5)
         ent_exclude_files.bind("<FocusOut>", lambda e: self.save_settings())
         ent_exclude_files.bind("<Return>", lambda e: self.save_settings())
-        tk.Label(frm, text="e.g. App_Code/Constants.cs; Web.config", font=("Calibri", 9), fg="gray40").grid(row=6, column=2, sticky="w")
+        make_hint(frm, "e.g. App_Code/Constants.cs").grid(row=6, column=2, sticky="w", padx=(10, 0))
 
         # Non-git projects (e.g. published API folders)
-        tk.Checkbutton(
+        make_check(
             frm,
-            text="Not a git project - compare the whole folder side by side",
-            variable=self.manual_var,
+            "Not a git project - compare the whole folder side by side",
+            self.manual_var,
             command=self.save_manual_flag,
-            font=("Calibri", 10),
-        ).grid(row=7, column=1, columnspan=2, sticky="w", padx=5)
+        ).grid(row=7, column=1, sticky="w", pady=(6, 0))
 
-        # Action button
-        self.btn_open = tk.Button(
-            frm,
-            text="Check Git & Open in Beyond Compare",
-            bg="#28a745",
-            fg="white",
-            activebackground="#218838",
-            activeforeground="white",
-            font=("Calibri", 12, "bold"),
-            padx=20,
-            pady=8,
-            command=self.check_and_open,
+        # ---------- Bottom action bar (packed first so it is never pushed off-screen) ----------
+        bottom = tk.Frame(self.root, bg=COLOR_BG)
+        bottom.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
+
+        self.btn_logs = make_button(bottom, "Generate Logs", self.generate_logs, COLOR_PURPLE)
+        self.btn_logs.pack(side="left", padx=(6, 0))
+        self.btn_clear = make_button(bottom, "Clear Logs", self.clear_log, COLOR_ORANGE)
+        self.btn_clear.pack(side="left", padx=(6, 0))
+        self.btn_open = make_button(
+            bottom,
+            "Check Git & Open in Beyond Compare",
+            self.check_and_open,
+            COLOR_GREEN,
+            font_size=10,
+            bold=True,
+            pady=10,
+            padx=13,
         )
-        self.btn_open.grid(row=8, column=0, columnspan=2, pady=10)
+        self.btn_open.pack(side="right")
 
-        log_btns = tk.Frame(frm)
-        log_btns.grid(row=8, column=2, padx=0, pady=10, sticky="ew")
-
-        self.btn_logs = tk.Button(
-            log_btns,
-            text="Generate Logs",
-            bg="#87CEEB",
-            activebackground="#6BB9DC",
-            font=("Calibri", 10, "bold"),
-            padx=12,
-            pady=4,
-            command=self.generate_logs,
-        )
-        self.btn_logs.pack(fill="x", pady=(0, 4))
-
-        self.btn_clear = tk.Button(
-            log_btns,
-            text="Clear Logs",
-            bg="#FFD8A8",
-            activebackground="#F5C48A",
-            font=("Calibri", 10, "bold"),
-            padx=12,
-            pady=4,
-            command=self.clear_log,
-        )
-        self.btn_clear.pack(fill="x")
-
-        # Log
-        self.log_box = ScrolledText(frm, font=("Consolas", 9), height=12, state="disabled", wrap="none")
-        self.log_box.grid(row=9, column=0, columnspan=3, sticky="nsew")
+        # ---------- Log card ----------
+        log_card = make_card(self.root, "Log")
+        log_card.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self.log_box = make_code_box(log_card, height=12, wrap="none", state="disabled")
+        self.log_box.pack(fill="both", expand=True, padx=10, pady=10)
 
     @staticmethod
     def _center(root, width, height):

@@ -645,6 +645,62 @@ class SPFileGenerator:
             "The form has been clear to Generate SQL Files mode."
         )
 
+    def show_list_dialog(self, title, summary, rows):
+        """rows: list of (sp_name, status) tuples."""
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.minsize(420, 300)
+        win.configure(bg=COLOR_BG)
+        win.transient(self.root)
+
+        tk.Label(
+            win, text=summary, font=(FONT, 10), bg=COLOR_BG, fg=COLOR_TEXT,
+            justify="left", wraplength=520, anchor="w",
+        ).pack(fill="x", padx=14, pady=(14, 6))
+
+        style = ttk.Style()
+        style.configure(
+            "SP.Treeview", font=(FONT, 10), rowheight=24,
+            background="#fafbfc", fieldbackground="#fafbfc", foreground=COLOR_TEXT,
+        )
+        style.configure("SP.Treeview.Heading", font=(FONT, 10, "bold"))
+
+        table = tk.Frame(win, bg=COLOR_BG)
+        table.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        tree = ttk.Treeview(
+            table, columns=("name", "status"), show="headings",
+            style="SP.Treeview", selectmode="extended",
+        )
+        tree.heading("name", text="SP Name", anchor="w")
+        tree.heading("status", text="Status", anchor="w")
+        tree.column("name", width=400, anchor="w")
+        tree.column("status", width=90, anchor="w", stretch=False)
+
+        scroll = ttk.Scrollbar(table, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        for name, status in rows:
+            tree.insert("", "end", values=(name, status))
+
+        def copy():
+            win.clipboard_clear()
+            win.clipboard_append("\n".join(name for name, _ in rows))
+
+        btns = tk.Frame(win, bg=COLOR_BG)
+        btns.pack(fill="x", padx=14, pady=(0, 14))
+        make_button(btns, "Close", win.destroy, COLOR_ACCENT).pack(side="right")
+        make_button(btns, "Copy", copy, COLOR_TEAL).pack(side="right", padx=(0, 8))
+
+        # Center on the screen
+        w, h = 580, 460
+        x = (win.winfo_screenwidth() - w) // 2
+        y = (win.winfo_screenheight() - h) // 2
+        win.geometry("{}x{}+{}+{}".format(w, h, x, y))
+        win.grab_set()
+
     def verify_files(self):
         """Check that every .sql file name matches the SP name inside it
         (SIT Scripts and Backup folders), plus the open tabs if SP Name is set.
@@ -658,7 +714,10 @@ class SPFileGenerator:
             )
             return
 
+        # problems, checked, old_files, sp_names = [], 0, [], []
         problems, checked, old_files = [], 0, []
+        names_by_tag = {"SIT Scripts": set(), "Backup": set()}
+
         for folder, tag in ((output_dir, "SIT Scripts"), (os.path.join(output_dir, "Backup"), "Backup")):
             if not os.path.isdir(folder):
                 continue
@@ -670,6 +729,7 @@ class SPFileGenerator:
                     old_files.append(tag + "\\" + name)
                     continue
                 checked += 1
+                names_by_tag[tag].add(name[:-4])
                 try:
                     content = read_sql(os.path.join(folder, name))
                 except Exception as ex:
@@ -703,11 +763,30 @@ class SPFileGenerator:
                 "Possible wrong file copied:\n\n" + "\n".join(problems) + old_note,
             )
         else:
-            messagebox.showinfo(
+            new_sps = sorted(names_by_tag["SIT Scripts"] - names_by_tag["Backup"], key=str.lower)
+            modified_sps = sorted(names_by_tag["Backup"], key=str.lower)
+            rows = [(n, "New") for n in new_sps] + [(n, "Modified") for n in modified_sps]
+
+            self.show_list_dialog(
                 "Verified",
                 "All " + str(checked) + " SQL file(s) match their stored procedure names."
                 + old_note,
+                rows,
             )
+            # if len(rows) > 10:
+            #     self.show_list_dialog(
+            #         "Verified",
+            #         "All " + str(checked) + " SQL file(s) match their stored procedure names."
+            #         + old_note,
+            #         rows,
+            #     )
+            # else:
+            #     messagebox.showinfo(
+            #         "Verified",
+            #         "All " + str(checked) + " SQL file(s) match their stored procedure names:\n\n"
+            #         + "\n".join(rows)
+            #         + old_note,
+            #     )
 
     def open_url_generator(self):
         win = tk.Toplevel(self.root)
