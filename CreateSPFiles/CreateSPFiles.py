@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+import difflib
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -133,6 +134,101 @@ def make_code_box(parent, **kwargs):
         **kwargs
     )
 
+def bind_select_all(widget):
+    def _select_all(event):
+        event.widget.tag_add("sel", "1.0", "end-1c")
+        return "break"
+    widget.bind("<Control-a>", _select_all)
+    widget.bind("<Control-A>", _select_all)
+
+def bind_horizontal_wheel(widgets, scroll_fn):
+    """Shift+wheel / touchpad two-finger sideways scroll -> scroll_fn(units)."""
+    acc = [0.0]
+
+    def handler(event):
+        if event.num == 6:            # Linux: scroll left
+            units = -4
+        elif event.num == 7:          # Linux: scroll right
+            units = 4
+        else:                         # Windows: Shift+wheel or touchpad horizontal
+            acc[0] += -event.delta / 120 * 4     # 4 chars per wheel notch
+            units = int(acc[0])
+            acc[0] -= units
+        if units:
+            scroll_fn(units)
+        return "break"
+
+    for w in widgets:
+        for seq in ("<Shift-MouseWheel>", "<Button-6>", "<Button-7>"):
+            try:
+                w.bind(seq, handler)
+            except tk.TclError:
+                pass
+
+def add_tooltip(widget, text):
+    tip = {"w": None}
+
+    def show(_e):
+        if tip["w"]:
+            return
+        w = tk.Toplevel(widget)
+        w.wm_overrideredirect(True)
+        w.wm_geometry("+%d+%d" % (widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height() + 4))
+        tk.Label(w, text=text, font=(FONT, 9), bg=COLOR_HEADER, fg="white", padx=8, pady=3).pack()
+        tip["w"] = w
+
+    def hide(_e):
+        if tip["w"]:
+            tip["w"].destroy()
+            tip["w"] = None
+
+    widget.bind("<Enter>", show, add="+")
+    widget.bind("<Leave>", hide, add="+")
+
+def with_width_pad(left_rows, right_rows):
+    """Add one blank row to both sides, padded to the longest line on either side.
+    Both panes then have the same scrollable width, so a shared scrollbar stays aligned."""
+    width = max((len(t.expandtabs()) for t, _tag in left_rows + right_rows), default=0)
+    if not width:
+        return left_rows, right_rows
+    pad = (" " * width, "equal")
+    return left_rows + [pad], right_rows + [pad]    
+
+def spin_value(var, default):
+    """Read a Spinbox IntVar safely (empty or invalid text falls back to default)."""
+    try:
+        return max(0, int(var.get()))
+    except (tk.TclError, ValueError):
+        return default
+
+def make_spin(parent, var, command):
+    """Themed Spinbox (ttk, styled in apply_ttk_theme)."""
+    sb = ttk.Spinbox(parent, from_=0, to=500, width=4, textvariable=var,
+                     font=(FONT, 9), command=command)
+    sb.bind("<Return>", lambda _e: command())
+    sb.bind("<FocusOut>", lambda _e: command())
+    return sb    
+
+def comment_flags(rows):
+    """For each (text, tag) row: True if the line is blank or a comment (-- , //, /* ... */)."""
+    flags, in_block = [], False
+    for text, _tag in rows:
+        s = text.strip()
+        if not s:
+            flags.append(True)
+        elif in_block:
+            flags.append(True)
+            if "*/" in s:
+                in_block = False
+        elif s.startswith("--") or s.startswith("//"):
+            flags.append(True)
+        elif s.startswith("/*"):
+            flags.append(True)
+            if "*/" not in s[2:]:
+                in_block = True
+        else:
+            flags.append(False)
+    return flags
 
 def apply_ttk_theme():
     """Style the ttk widgets (Notebook tabs, Combobox) to match."""
@@ -164,6 +260,25 @@ def apply_ttk_theme():
         lightcolor=COLOR_BORDER,
         darkcolor=COLOR_BORDER,
         arrowcolor=COLOR_MUTED,
+    )
+    style.configure(
+        "TSpinbox",
+        padding=4,
+        fieldbackground="#ffffff",
+        foreground=COLOR_TEXT,
+        background="#dbe2ea",
+        bordercolor=COLOR_BORDER,
+        lightcolor=COLOR_BORDER,
+        darkcolor=COLOR_BORDER,
+        arrowcolor=COLOR_MUTED,
+        arrowsize=12,
+    )
+    style.map(
+        "TSpinbox",
+        bordercolor=[("focus", COLOR_ACCENT)],
+        lightcolor=[("focus", COLOR_ACCENT)],
+        darkcolor=[("focus", COLOR_ACCENT)],
+        background=[("active", COLOR_BORDER)],
     )
 
 
@@ -263,7 +378,7 @@ def build_sp_urls(sample_url, sp_text):
     urls, seen = [], set()
     for token in re.split(r"[\s,;]+", sp_text or ""):
         sp_name = clean_sp_name(token)
-        if sp_name and sp_name.lower() not in seen:
+        if sp_name and sp_name.lower() not in seen and not sp_name.lower().endswith("_old"):
             seen.add(sp_name.lower())
             urls.append(folder + sp_name + ".sql" + suffix)
     return urls
@@ -331,6 +446,329 @@ def name_problem(expected, sql_text, label):
         return label + ": script is for '" + found + "' but expected '" + expected + "'."
     return None
 
+# ============================================================
+#               COMPARE WINDOW (full screen / multi-file)
+# ============================================================
+
+def build_diff_rows(old, new):
+    """Align two scripts side by side.
+    Returns (left_rows, right_rows, change_rows); rows are (text, tag), equal length."""
+    if not old.strip():
+        right = [(line, "equal") for line in new.splitlines()] or [("", "equal")]
+        left = [("(no backup — New SP)", "pad")] + [("", "pad")] * (len(right) - 1)
+        return left, right, []
+
+    old_lines, new_lines = old.splitlines(), new.splitlines()
+    left, right = [], []
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            left += [(t, "equal") for t in old_lines[i1:i2]]
+            right += [(t, "equal") for t in new_lines[j1:j2]]
+        elif tag == "replace" and (i2 - i1) == (j2 - j1):
+            left += [(t, "replace") for t in old_lines[i1:i2]]
+            right += [(t, "replace") for t in new_lines[j1:j2]]
+        else:  # delete / insert / uneven replace
+            left += [(t, "delete") for t in old_lines[i1:i2]] + [("", "pad")] * (j2 - j1)
+            right += [("", "pad")] * (i2 - i1) + [(t, "insert") for t in new_lines[j1:j2]]
+
+    change_rows = [
+        i for i, ((_a, lt), (_b, rt)) in enumerate(zip(left, right))
+        if lt != "equal" or rt != "equal"
+    ]
+    return left, right, change_rows
+
+
+def group_hunks(change_rows):
+    """Consecutive changed rows -> blocks [(first_row, last_row), ...]."""
+    hunks = []
+    for row in change_rows:
+        if hunks and row == hunks[-1][1] + 1:
+            hunks[-1] = (hunks[-1][0], row)
+        else:
+            hunks.append((row, row))
+    return hunks
+
+
+class CompareWindow(tk.Toplevel):
+    """Resizable side-by-side compare window.
+    items: list of (name, old_text, new_text). Not transient on purpose, so the
+    window keeps its own minimize / maximize buttons."""
+
+    def __init__(self, app, items, start=0, fullscreen=False):
+        super().__init__(app.root)
+        self.app = app                      # shares the Diffs / Context settings with the main window
+        self.items = items
+        self.index = 0
+        self.left_rows, self.right_rows = [], []
+        self.change_rows, self.hunks = [], []
+        self.display_to_full = []
+        self.nav_index = -1
+        self._syncing = False
+        self._xsyncing = False
+
+        self.title("Compare Files")
+        self.geometry("1400x850")
+        self.minsize(900, 500)
+        self.configure(bg=COLOR_BG)
+        self._build()
+        if fullscreen:
+            self.set_fullscreen(True)
+        else:
+            try:
+                self.state("zoomed")        # open maximized; min/max/restore still work
+            except tk.TclError:
+                pass
+        self.show_item(start)
+        self.focus_set()
+
+    # ---------- UI ----------
+    def _build(self):
+        app = self.app
+
+        # Row 1: file navigation
+        nav = tk.Frame(self, bg=COLOR_CARD, highlightthickness=1, highlightbackground=COLOR_BORDER)
+        nav.pack(fill="x", padx=10, pady=(10, 0))
+        inner = tk.Frame(nav, bg=COLOR_CARD)
+        inner.pack(fill="x", padx=10, pady=8)
+
+        make_button(inner, "◀ Prev File", lambda: self.show_item(self.index - 1),
+                    COLOR_PURPLE, pady=4, padx=10, font_size=9).pack(side="left")
+        make_button(inner, "Next File ▶", lambda: self.show_item(self.index + 1),
+                    COLOR_PURPLE, pady=4, padx=10, font_size=9).pack(side="left", padx=(6, 12))
+
+        self.file_combo = ttk.Combobox(
+            inner, state="readonly", font=LABEL_FONT, width=50,
+            values=[name for name, _old, _new in self.items],
+        )
+        self.file_combo.pack(side="left")
+        self.file_combo.bind("<<ComboboxSelected>>", lambda _e: self.show_item(self.file_combo.current()))
+
+        self.status_lbl = tk.Label(inner, font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_MUTED)
+        self.status_lbl.pack(side="left", padx=(12, 0))
+
+        self.fs_btn = make_button(inner, "Full Screen (F11)", self.toggle_fullscreen,
+                                  COLOR_TEAL, pady=4, padx=10, font_size=9)
+        self.fs_btn.pack(side="right")
+
+        # Row 2: view controls (variables shared with the main Diff tab)
+        bar = tk.Frame(self, bg=COLOR_CARD)
+        bar.pack(fill="x", padx=10, pady=(8, 0))
+        for text, mode in (("All", "all"), ("Diffs", "diffs")):
+            tk.Radiobutton(
+                bar, text=text, variable=app._diff_mode, value=mode, command=self.repaint,
+                font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT, activebackground=COLOR_CARD,
+                selectcolor="#dbeafe", indicatoron=False, padx=10, pady=3, relief="flat", borderwidth=1,
+            ).pack(side="left", padx=(0, 2))
+        tk.Checkbutton(
+            bar, text="+ Context", variable=app._diff_context, command=self.on_context_toggle,
+            font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT, activebackground=COLOR_CARD,
+            selectcolor="#dbeafe", indicatoron=False, padx=10, pady=3, relief="flat", borderwidth=1,
+        ).pack(side="left", padx=(0, 8))
+        make_button(bar, "Prev Change", self.prev_change, COLOR_TEAL,
+                    pady=3, padx=10, font_size=9).pack(side="left", padx=(0, 4))
+        make_button(bar, "Next Change", self.next_change, COLOR_TEAL,
+                    pady=3, padx=10, font_size=9).pack(side="left")
+        tk.Label(
+            bar, text="F7/F8 prev/next change   Ctrl+←/→ prev/next file   F11 full screen",
+            font=(FONT, 9), bg=COLOR_CARD, fg=COLOR_MUTED,
+        ).pack(side="right")
+
+        # Row 3: context spinboxes
+        bar2 = tk.Frame(self, bg=COLOR_CARD)
+        bar2.pack(fill="x", padx=10, pady=(6, 0))
+
+        def title(text, padx):
+            tk.Label(bar2, text=text, font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+                side="left", padx=padx)
+
+        def spin(label, var):
+            tk.Label(bar2, text=label, font=(FONT, 9), bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+                side="left", padx=(0, 4))
+            make_spin(bar2, var, self.repaint).pack(side="left", padx=(0, 12))
+
+        title("Context lines:", (0, 8))
+        spin("Before", app._ctx_before)
+        spin("After", app._ctx_after)
+        title("Comment-only changes:", (8, 8))
+        spin("Before", app._ctx_cmt_before)
+        spin("After", app._ctx_cmt_after)
+
+        # Panes: one shared vertical scrollbar, one horizontal scrollbar per side
+        panes = tk.Frame(self, bg=COLOR_CARD)
+        panes.pack(fill="both", expand=True, padx=10, pady=10)
+        panes.columnconfigure(0, weight=1)
+        panes.columnconfigure(1, weight=1)
+        panes.rowconfigure(1, weight=1)
+
+        make_field_label(panes, "Backup (old)").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        make_field_label(panes, "Modified (new)").grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
+
+        self.left = self._make_text(panes)
+        self.left.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        self.right = self._make_text(panes)
+        self.right.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+
+        self.vbar = ttk.Scrollbar(panes, orient="vertical", command=self._yview)
+        self.vbar.grid(row=1, column=2, sticky="ns")
+        self.hbar = ttk.Scrollbar(panes, orient="horizontal", command=self._xview)
+        self.hbar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+
+        self.left.configure(xscrollcommand=self._on_xscroll, yscrollcommand=self._on_yscroll)
+        self.right.configure(xscrollcommand=self._on_xscroll, yscrollcommand=self._on_yscroll)
+        bind_horizontal_wheel(
+            (self.left, self.right),
+            lambda n: self._xview("scroll", n, "units"),
+        )
+
+        self.bind("<F8>", lambda _e: self.next_change())
+        self.bind("<F7>", lambda _e: self.prev_change())
+        self.bind("<Control-Right>", lambda _e: self.show_item(self.index + 1))
+        self.bind("<Control-Left>", lambda _e: self.show_item(self.index - 1))
+        self.bind("<F11>", self.toggle_fullscreen)
+        self.bind("<Escape>", lambda _e: self.set_fullscreen(False))
+
+    def _make_text(self, parent):
+        w = tk.Text(
+            parent, font=("Consolas", 10), bg="#fafbfc", fg=COLOR_TEXT, relief="flat", bd=0,
+            wrap=tk.NONE, highlightthickness=1, highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_ACCENT, selectbackground="#bfdbfe", padx=8, pady=8,
+        )
+        w.tag_configure("equal", background="#fafbfc", foreground=COLOR_TEXT)
+        w.tag_configure("insert", background="#dcfce7", foreground="#14532d")
+        w.tag_configure("delete", background="#fee2e2", foreground="#7f1d1d")
+        w.tag_configure("replace", background="#fef9c3", foreground="#713f12")
+        w.tag_configure("pad", background="#f1f5f9", foreground="#94a3b8")
+        w.tag_configure("current_change", background="#93c5fd")
+        w.tag_raise("sel")
+        w.configure(state="disabled")
+        return w
+
+    # ---------- scrolling ----------
+    def _yview(self, *args):
+        self.left.yview(*args)
+        self.right.yview(*args)
+
+    def _xview(self, *args):
+        self.left.xview(*args)
+        self.right.xview(*args)
+
+    def _on_yscroll(self, first, last):
+        self.vbar.set(first, last)
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            self.left.yview_moveto(first)
+            self.right.yview_moveto(first)
+        finally:
+            self._syncing = False
+
+    def _on_xscroll(self, first, last):
+        self.hbar.set(first, last)
+        if self._xsyncing:
+            return
+        self._xsyncing = True
+        try:
+            self.left.xview_moveto(first)
+            self.right.xview_moveto(first)
+        finally:
+            self._xsyncing = False
+
+    def toggle_fullscreen(self, _event=None):
+        self.set_fullscreen(not bool(self.attributes("-fullscreen")))
+
+    def set_fullscreen(self, on):
+        self.attributes("-fullscreen", on)
+        self.fs_btn.config(text="Exit Full Screen (Esc)" if on else "Full Screen (F11)")
+
+    # ---------- content ----------
+    def show_item(self, i):
+        i %= len(self.items)
+        self.index = i
+        name, old, new = self.items[i]
+        self.left_rows, self.right_rows, self.change_rows = build_diff_rows(old, new)
+        self.hunks = group_hunks(self.change_rows)
+        self.nav_index = -1
+
+        self.file_combo.current(i)
+        self.title("Compare Files - %s  (%d / %d)" % (name, i + 1, len(self.items)))
+        if self.hunks:
+            info = "%d change block(s)" % len(self.hunks)
+        else:
+            info = "identical" if old.strip() else "new SP"
+        self.status_lbl.config(text="%d / %d    %s" % (i + 1, len(self.items), info))
+
+        self.repaint()
+        self.after_idle(self.next_change)   # jump to the first change
+
+    def on_context_toggle(self):
+        if self.app._diff_context.get() and self.app._diff_mode.get() == "all":
+            self.app._diff_mode.set("diffs")
+        self.repaint()
+
+    def repaint(self):
+        app = self.app
+        n = len(self.left_rows)
+        if app._diff_mode.get() == "all" or not self.change_rows:
+            show = list(range(n))
+        elif not app._diff_context.get():
+            show = list(self.change_rows)
+        else:
+            left_cmt = comment_flags(self.left_rows)
+            right_cmt = comment_flags(self.right_rows)
+            before = spin_value(app._ctx_before, 5)
+            after = spin_value(app._ctx_after, 5)
+            c_before = spin_value(app._ctx_cmt_before, 2)
+            c_after = spin_value(app._ctx_cmt_after, 2)
+            keep = set()
+            for h0, h1 in self.hunks:
+                only_comments = all(left_cmt[r] and right_cmt[r] for r in range(h0, h1 + 1))
+                b, a = (c_before, c_after) if only_comments else (before, after)
+                keep.update(range(max(0, h0 - b), min(n - 1, h1 + a) + 1))
+            show = sorted(keep)
+
+        self.display_to_full = show
+        left_view, right_view = with_width_pad(
+            [self.left_rows[r] for r in show], [self.right_rows[r] for r in show]
+        )
+        self._paint(self.left, left_view)
+        self._paint(self.right, right_view)
+
+    @staticmethod
+    def _paint(widget, rows):
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        for text, tag in rows:
+            widget.insert(tk.END, text + "\n", tag)
+        widget.configure(state="disabled")
+
+    # ---------- change navigation (block-wise) ----------
+    def next_change(self):
+        self._step(1)
+
+    def prev_change(self):
+        self._step(-1)
+
+    def _step(self, direction):
+        if not self.hunks:
+            return
+        if self.nav_index < 0:
+            self.nav_index = 0 if direction > 0 else len(self.hunks) - 1
+        else:
+            self.nav_index = (self.nav_index + direction) % len(self.hunks)
+        first, last = self.hunks[self.nav_index]
+        try:
+            d_first = self.display_to_full.index(first) + 1
+            d_last = self.display_to_full.index(last) + 1
+        except ValueError:
+            return
+        for w in (self.left, self.right):
+            w.tag_remove("current_change", "1.0", tk.END)
+            w.tag_add("current_change", "%d.0" % d_first, "%d.end" % d_last)
+        self._yview("%d.0" % max(1, d_first - 3))
+        self.after(1200, lambda: [w.tag_remove("current_change", "1.0", tk.END)
+                                  for w in (self.left, self.right)])
 
 # ============================================================
 #               MAIN APP
@@ -396,6 +834,51 @@ class SPFileGenerator:
             )
             return
         os.startfile(output_dir)
+
+    def open_fullscreen_diff(self):
+        modified = self.modified_text.get("1.0", "end-1c")
+        backup = "" if self.is_new_var.get() else self.backup_text.get("1.0", "end-1c")
+        if not modified.strip():
+            messagebox.showwarning("Modified SP Required", "Enter or open the modified SP script.")
+            return
+        name = clean_sp_name(self.sp_name_var.get()) or extract_sp_name(modified) or "Current SP"
+        CompareWindow(self, [(name, backup, modified)], fullscreen=True)
+
+    def open_compare_files(self):
+        output_dir = self.sit_folder_var.get().strip()
+        if not output_dir or not os.path.isdir(output_dir):
+            messagebox.showwarning(
+                "Output Folder Required",
+                "Select or find the exact CRF SIT output folder first.",
+            )
+            return
+
+        backup_dir = os.path.join(output_dir, "Backup")
+        items = []
+        if os.path.isdir(backup_dir):
+            for name in sorted(os.listdir(backup_dir), key=str.lower):
+                low = name.lower()
+                if not low.endswith(".sql") or low.endswith("_old.sql"):
+                    continue
+                new_path = os.path.join(output_dir, name)
+                if not os.path.isfile(new_path):
+                    continue
+                try:
+                    items.append((name[:-4], read_sql(os.path.join(backup_dir, name)), read_sql(new_path)))
+                except Exception as ex:
+                    messagebox.showerror("Read Failed", name + ": " + str(ex))
+                    return
+
+        if not items:
+            messagebox.showinfo(
+                "Compare Files",
+                "No modified SPs found.\n\nA SP needs a file in SIT Scripts and a matching file in SIT Scripts\\Backup.",
+            )
+            return
+
+        current = clean_sp_name(self.sp_name_var.get()).lower()
+        start = next((i for i, item in enumerate(items) if item[0].lower() == current), 0)
+        CompareWindow(self, items, start)    
 
     def _build_ui(self):
         # ---------- Top card: CRF & SP details ----------
@@ -484,26 +967,176 @@ class SPFileGenerator:
         make_button(bottom, "Open Folder", self.open_output_folder, COLOR_TEAL).pack(side="left", padx=(8, 0))
         make_button(bottom, "Clear", self.clear_inputs, COLOR_ORANGE).pack(side="left", padx=(8, 0))
         make_button(bottom, "Generate URLs", self.open_url_generator, COLOR_ACCENT).pack(side="left", padx=(8, 0))
+        make_button(bottom, "Compare Files", self.open_compare_files, COLOR_PURPLE).pack(side="left", padx=(8, 0))
         self.generate_button = make_button(
             bottom, "Generate SQL Files", self.generate, COLOR_GREEN,
             font_size=12, bold=True, pady=10, padx=24
         )
         self.generate_button.pack(side="right")
 
-        # ---------- Notebook: Modified / Backup ----------
+        # ---------- Notebook: Modified / Backup / Diff ----------
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=14, pady=(0, 8))
 
         modified_frame = tk.Frame(self.notebook, bg=COLOR_CARD)
         backup_frame = tk.Frame(self.notebook, bg=COLOR_CARD)
+        diff_frame = tk.Frame(self.notebook, bg=COLOR_CARD)
+
         self.notebook.add(modified_frame, text="Modified SP")
         self.notebook.add(backup_frame, text="Backup SP")
+        self.notebook.add(diff_frame, text="Diff")
 
         self.modified_text = make_code_box(modified_frame, wrap=tk.NONE, undo=True)
         self.modified_text.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.backup_text = make_code_box(backup_frame, wrap=tk.NONE, undo=True)
         self.backup_text.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # ---- Diff tab: side-by-side (Backup | Modified) ----
+        diff_toolbar = tk.Frame(diff_frame, bg=COLOR_CARD)
+        diff_toolbar.pack(fill="x", padx=10, pady=(10, 0))
+
+        # View mode: All / Only Diffs / Context
+        self._diff_mode = tk.StringVar(value="all")
+        self._diff_context = tk.BooleanVar(value=False)
+        self._ctx_before = tk.IntVar(value=5)
+        self._ctx_after = tk.IntVar(value=5)
+        self._ctx_cmt_before = tk.IntVar(value=2)
+        self._ctx_cmt_after = tk.IntVar(value=2)
+        mode_row = tk.Frame(diff_toolbar, bg=COLOR_CARD)
+        mode_row.pack(side="left")
+
+        bind_select_all(self.modified_text)
+        bind_select_all(self.backup_text)
+
+        def _mode_btn(text, mode):
+            return tk.Radiobutton(
+                mode_row,
+                text=text,
+                variable=self._diff_mode,
+                value=mode,
+                command=self._apply_diff_view,
+                font=(FONT, 9, "bold"),
+                bg=COLOR_CARD,
+                fg=COLOR_TEXT,
+                activebackground=COLOR_CARD,
+                selectcolor="#dbeafe",
+                indicatoron=False,
+                padx=10,
+                pady=3,
+                relief="flat",
+                borderwidth=1,
+            )
+
+        _mode_btn("All", "all").pack(side="left", padx=(0, 2))
+        _mode_btn("Diffs", "diffs").pack(side="left", padx=(0, 2))
+        tk.Checkbutton(
+            mode_row,
+            text="+ Context",
+            variable=self._diff_context,
+            command=self._on_context_toggle,
+            font=(FONT, 9, "bold"),
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT,
+            activebackground=COLOR_CARD,
+            selectcolor="#dbeafe",
+            indicatoron=False,
+            padx=10,
+            pady=3,
+            relief="flat",
+            borderwidth=1,
+        ).pack(side="left", padx=(0, 8))
+
+        make_button(
+            diff_toolbar, "Prev Change", self.diff_prev_change,
+            COLOR_TEAL, pady=3, padx=10, font_size=9,
+        ).pack(side="left", padx=(0, 4))
+        make_button(
+            diff_toolbar, "Next Change", self.diff_next_change,
+            COLOR_TEAL, pady=3, padx=10, font_size=9,
+        ).pack(side="left", padx=(0, 8))
+
+        make_button(
+            diff_toolbar, "Refresh Diff", self.refresh_diff,
+            COLOR_ACCENT, pady=3, padx=10, font_size=9,
+        ).pack(side="left", padx=(0, 4))
+        fs_btn = make_button(
+            diff_toolbar, "⛶", self.open_fullscreen_diff,
+            COLOR_PURPLE, pady=1, padx=8, font_size=12,
+        )
+        fs_btn.pack(side="left")
+        add_tooltip(fs_btn, "Full screen compare of this SP")
+
+        tk.Label(
+            diff_toolbar,
+            text="  Red = removed   Yellow = changed   Green = added",
+            font=(FONT, 9), bg=COLOR_CARD, fg=COLOR_MUTED,
+        ).pack(side="left", padx=(8, 0))
+
+        ctx_bar = tk.Frame(diff_frame, bg=COLOR_CARD)
+        ctx_bar.pack(fill="x", padx=10, pady=(6, 0))
+
+        def _ctx_title(text, padx):
+            tk.Label(ctx_bar, text=text, font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+                side="left", padx=padx
+            )
+
+        def _spin(label, var):
+            tk.Label(ctx_bar, text=label, font=(FONT, 9), bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+                side="left", padx=(0, 4)
+            )
+            make_spin(ctx_bar, var, self._apply_diff_view).pack(side="left", padx=(0, 12))
+
+        _ctx_title("Context lines:", (0, 8))
+        _spin("Before", self._ctx_before)
+        _spin("After", self._ctx_after)
+        _ctx_title("Comment-only changes:", (8, 8))
+        _spin("Before", self._ctx_cmt_before)
+        _spin("After", self._ctx_cmt_after)
+
+        # Full aligned diff rows (before filtering by All/Diffs/Context)
+        self._diff_full_left = []
+        self._diff_full_right = []
+        self._diff_change_rows = []   # row indices in the FULL lists that are changes
+        self._diff_nav_index = -1     # index into _diff_change_rows for Next/Prev
+        self._diff_display_to_full = []  # maps visible row -> full row index
+
+        # ---- Side-by-side panes ----
+        diff_panes = tk.Frame(diff_frame, bg=COLOR_CARD)
+        diff_panes.pack(fill="both", expand=True, padx=10, pady=10)
+        diff_panes.columnconfigure(0, weight=1)
+        diff_panes.columnconfigure(1, weight=1)
+        diff_panes.rowconfigure(1, weight=1)
+
+        make_field_label(diff_panes, "Backup (old)", size=10).grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        make_field_label(diff_panes, "Modified (new)", size=10).grid(
+            row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 4)
+        )
+
+        self.diff_left = make_code_box(diff_panes, wrap=tk.NONE, undo=False)
+        self.diff_left.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        self.diff_right = make_code_box(diff_panes, wrap=tk.NONE, undo=False)
+        self.diff_right.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+
+        # Shared horizontal scrollbar: both panes scroll sideways together
+        self._xsyncing = False
+        self.diff_hbar = ttk.Scrollbar(diff_panes, orient="horizontal", command=self._diff_xview)
+        self.diff_hbar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.diff_left.configure(xscrollcommand=self._on_diff_xscroll)
+        self.diff_right.configure(xscrollcommand=self._on_diff_xscroll)
+        bind_horizontal_wheel(
+            (self.diff_left, self.diff_right),
+            lambda n: self._diff_xview("scroll", n, "units"),
+        )
+
+        # Read-only feel for diff panes
+        for w in (self.diff_left, self.diff_right):
+            w.configure(state="disabled")
+
+        self._configure_diff_tags()
+        self._bind_diff_scroll_sync()
 
     def browse_crf_root(self):
         folder = filedialog.askdirectory(
@@ -612,6 +1245,13 @@ class SPFileGenerator:
                 self._set_text(self.backup_text, read_sql(backup_path))
                 self.is_new_var.set(False)
                 self.notebook.select(0)
+                self.refresh_diff()
+                if not self.is_new_var.get() and self.backup_text.get("1.0", "end-1c").strip():
+                    # optional: jump to Diff only when something actually changed
+                    old_l = self.backup_text.get("1.0", "end-1c").splitlines()
+                    new_l = self.modified_text.get("1.0", "end-1c").splitlines()
+                    if old_l != new_l:
+                        self.notebook.select(2)  # Diff tab index
                 self.rename_cb.grid_remove()
                 self.rename_from_script_var.set(False)
             else:
@@ -626,12 +1266,23 @@ class SPFileGenerator:
                     "\"Rename file to match SP name in Modified tab\" so the file is\n"
                     "renamed (old file replaced) on Update.",
                 )
+                self.refresh_diff()
+
         except Exception as ex:
             messagebox.showerror("Read Failed", str(ex))
 
     def clear_inputs(self):
         # if not messagebox.askyesno("Clear", "Clear both SQL tabs and the SP name?"):
         #     return
+        self._diff_full_left = []
+        self._diff_full_right = []
+        self._diff_change_rows = []
+        self._diff_nav_index = -1
+        self._diff_display_to_full = []
+        self._diff_mode.set("all")
+        self._diff_context.set(False)
+        self._set_diff_text(self.diff_left, [])
+        self._set_diff_text(self.diff_right, [])
         self.modified_text.delete("1.0", tk.END)
         self.backup_text.delete("1.0", tk.END)
         self.sp_name_var.set("")
@@ -642,7 +1293,7 @@ class SPFileGenerator:
         self.set_update_mode(False)
         messagebox.showinfo(
             "Clear",
-            "The form has been clear to Generate SQL Files mode."
+            "The form has been cleared to Generate SQL Files mode."
         )
 
     def show_list_dialog(self, title, summary, rows):
@@ -686,8 +1337,36 @@ class SPFileGenerator:
             tree.insert("", "end", values=(name, status))
 
         def copy():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("Nothing Selected", "Select one or more SPs first.", parent=win)
+                return
+            names = [tree.item(iid, "values")[0] for iid in selected]
             win.clipboard_clear()
-            win.clipboard_append("\n".join(name for name, _ in rows))
+            win.clipboard_append("\n".join(names))
+
+        def select_all(_event=None):
+            tree.selection_set(tree.get_children())
+            return "break"  # stop further handling
+
+        def on_double_click(event):
+            iid = tree.identify_row(event.y)
+            if not iid:
+                return
+            sp_name = tree.item(iid, "values")[0]
+            if not sp_name:
+                return
+            # Same behaviour as the "Open SP Files" button
+            self.sp_name_var.set(sp_name)
+            win.destroy()  # close verify dialog so focus returns to main window
+            self.open_sp_files()
+
+        tree.bind("<Double-1>", on_double_click)
+        tree.bind("<Control-a>", select_all)
+        tree.bind("<Control-A>", select_all)  # Caps Lock / some layouts
+
+        # Focus the tree so keyboard shortcuts work immediately
+        tree.focus_set()
 
         btns = tk.Frame(win, bg=COLOR_BG)
         btns.pack(fill="x", padx=14, pady=(0, 14))
@@ -767,12 +1446,13 @@ class SPFileGenerator:
             modified_sps = sorted(names_by_tag["Backup"], key=str.lower)
             rows = [(n, "New") for n in new_sps] + [(n, "Modified") for n in modified_sps]
 
-            self.show_list_dialog(
-                "Verified",
-                "All " + str(checked) + " SQL file(s) match their stored procedure names."
-                + old_note,
-                rows,
+            summary = (
+                "All " + str(checked) + " SQL file(s) match their stored procedure names.\n"
+                + "New: " + str(len(new_sps))
+                + "    Modified: " + str(len(modified_sps))
+                + old_note
             )
+            self.show_list_dialog("Verified", summary, rows)
             # if len(rows) > 10:
             #     self.show_list_dialog(
             #         "Verified",
@@ -850,6 +1530,8 @@ class SPFileGenerator:
         make_field_label(body, "SP list (one per line, or comma separated)").pack(fill="x", pady=(14, 4))
         sp_box = make_code_box(body, height=10, wrap=tk.NONE)
         sp_box.pack(fill="both", expand=True)
+
+        bind_select_all(sp_box)
 
         make_field_label(body, "Generated URLs").pack(fill="x", pady=(14, 4))
         out_box = make_code_box(body, height=10, wrap=tk.NONE)
@@ -980,6 +1662,21 @@ class SPFileGenerator:
                 if os.path.isfile(candidate):
                     old_path = candidate
 
+        if (
+            use_script_name
+            and os.path.exists(modified_path)
+            and (
+                not old_path
+                or os.path.normcase(os.path.normpath(old_path))
+                != os.path.normcase(os.path.normpath(modified_path))
+            )
+        ):
+            if not messagebox.askyesno(
+                "File Exists",
+                sp_name + ".sql already exists in the SIT Scripts folder.\n\nOverwrite it?",
+            ):
+                return
+
         try:
             # Write new/updated file under the (possibly new) name
             existed = os.path.exists(modified_path)
@@ -992,7 +1689,7 @@ class SPFileGenerator:
             if use_script_name and old_path:
                 old_path = os.path.normpath(old_path)
                 new_path = os.path.normpath(modified_path)
-                if old_path.lower() != new_path.lower() and os.path.isfile(old_path):
+                if os.path.normcase(old_path) != os.path.normcase(new_path) and os.path.isfile(old_path):
                     os.remove(old_path)
                     written.append("Removed old file: " + old_path)
 
@@ -1011,7 +1708,258 @@ class SPFileGenerator:
         self.set_update_mode(True)
         self.save_settings()
         messagebox.showinfo("Success", "SQL file(s) saved:\n\n" + "\n".join(written))
+        self.refresh_diff()
 
+    def _configure_diff_tags(self):
+        """Color tags used by the Diff tab (Beyond Compare style)."""
+        for widget in (self.diff_left, self.diff_right):
+            widget.tag_configure("equal", background="#fafbfc", foreground=COLOR_TEXT)
+            widget.tag_configure("insert", background="#dcfce7", foreground="#14532d")   # green
+            widget.tag_configure("delete", background="#fee2e2", foreground="#7f1d1d")   # red
+            widget.tag_configure("replace", background="#fef9c3", foreground="#713f12")  # yellow
+            widget.tag_configure("pad", background="#f1f5f9", foreground="#94a3b8")
+            widget.tag_configure("current_change", background="#93c5fd")  # blue highlight for nav
+
+    def _bind_diff_scroll_sync(self):
+        """Keep left/right Diff panes scrolling together vertically."""
+        def sync_from_left(*_args):
+            first, last = self.diff_left.yview()
+            self.diff_right.yview_moveto(first)
+
+        def sync_from_right(*_args):
+            first, last = self.diff_right.yview()
+            self.diff_left.yview_moveto(first)
+
+        # Mouse wheel on either pane moves both
+        def on_mousewheel(event, source):
+            # Windows / Linux
+            delta = -1 * (event.delta // 120) if event.delta else (-1 if event.num == 4 else 1)
+            source.yview_scroll(delta, "units")
+            other = self.diff_right if source is self.diff_left else self.diff_left
+            other.yview_moveto(source.yview()[0])
+            return "break"
+
+        self.diff_left.bind("<MouseWheel>", lambda e: on_mousewheel(e, self.diff_left))
+        self.diff_right.bind("<MouseWheel>", lambda e: on_mousewheel(e, self.diff_right))
+        # Linux
+        for w in (self.diff_left, self.diff_right):
+            w.bind("<Button-4>", lambda e, src=w: on_mousewheel(e, src))
+            w.bind("<Button-5>", lambda e, src=w: on_mousewheel(e, src))
+
+    def _diff_xview(self, *args):
+        self.diff_left.xview(*args)
+        self.diff_right.xview(*args)
+
+    def _on_diff_xscroll(self, first, last):
+        self.diff_hbar.set(first, last)
+        if self._xsyncing:
+            return
+        self._xsyncing = True
+        try:
+            self.diff_left.xview_moveto(first)
+            self.diff_right.xview_moveto(first)
+        finally:
+            self._xsyncing = False
+
+    def _set_diff_text(self, widget, lines_with_tags):
+        """lines_with_tags: list of (line_text, tag_name)."""
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        for text, tag in lines_with_tags:
+            start = widget.index("end-1c")
+            widget.insert(tk.END, text + "\n")
+            end = widget.index("end-1c")
+            widget.tag_add(tag, start, end)
+        widget.configure(state="disabled")
+
+    def _append_replace_block(self, left_rows, right_rows, old_chunk, new_chunk):
+        """
+        Color a replace hunk properly:
+        - same number of lines → yellow (line-level edit)
+        - different counts → red on left, green on right (structural add/remove)
+        """
+        if len(old_chunk) == len(new_chunk) and len(old_chunk) > 0:
+            for o, n in zip(old_chunk, new_chunk):
+                left_rows.append((o, "replace"))
+                right_rows.append((n, "replace"))
+            return
+
+        # Structural change: do not force 1:1 yellow pairing
+        for line in old_chunk:
+            left_rows.append((line, "delete"))
+            right_rows.append(("", "pad"))
+        for line in new_chunk:
+            left_rows.append(("", "pad"))
+            right_rows.append((line, "insert"))
+
+    def refresh_diff(self):
+        """Rebuild the full Diff alignment from Modified / Backup tabs, then apply view mode."""
+        old = self.backup_text.get("1.0", "end-1c")
+        new = self.modified_text.get("1.0", "end-1c")
+
+        left_rows = []
+        right_rows = []
+
+        if self.is_new_var.get() or not old.strip():
+            left_rows = [("(no backup — New SP)", "pad")]
+            right_rows = [(line, "equal") for line in new.splitlines()] or [("", "equal")]
+            self._diff_full_left = left_rows
+            self._diff_full_right = right_rows
+            self._diff_change_rows = []
+            self._diff_nav_index = -1
+            self._apply_diff_view()
+            return
+
+        old_lines = old.splitlines()
+        new_lines = new.splitlines()
+        matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                for line in old_lines[i1:i2]:
+                    left_rows.append((line, "equal"))
+                for line in new_lines[j1:j2]:
+                    right_rows.append((line, "equal"))
+            elif tag == "replace":
+                self._append_replace_block(
+                    left_rows, right_rows,
+                    old_lines[i1:i2], new_lines[j1:j2],
+                )
+            elif tag == "delete":
+                for line in old_lines[i1:i2]:
+                    left_rows.append((line, "delete"))
+                    right_rows.append(("", "pad"))
+            elif tag == "insert":
+                for line in new_lines[j1:j2]:
+                    left_rows.append(("", "pad"))
+                    right_rows.append((line, "insert"))
+
+        # Change rows = any row that is not pure equal on both sides
+        change_rows = []
+        for idx, ((lt, ltag), (rt, rtag)) in enumerate(zip(left_rows, right_rows)):
+            if ltag != "equal" or rtag != "equal":
+                change_rows.append(idx)
+
+        self._diff_full_left = left_rows
+        self._diff_full_right = right_rows
+        self._diff_change_rows = change_rows
+        self._diff_nav_index = -1
+        self._apply_diff_view()
+
+    def _on_context_toggle(self):
+        # Context only makes sense on top of Diffs, so turning it on from "All" switches to Diffs.
+        if self._diff_context.get() and self._diff_mode.get() == "all":
+            self._diff_mode.set("diffs")
+        self._apply_diff_view()
+
+    def _apply_diff_view(self):
+        """Filter full diff into All / Only Diffs / Context and paint the panes."""
+        left = list(self._diff_full_left)
+        right = list(self._diff_full_right)
+        if not left and not right:
+            self._set_diff_text(self.diff_left, [])
+            self._set_diff_text(self.diff_right, [])
+            self._diff_display_to_full = []
+            return
+
+        mode = self._diff_mode.get()
+        n = max(len(left), len(right))
+        # Pad if somehow unequal (should not happen)
+        while len(left) < n:
+            left.append(("", "pad"))
+        while len(right) < n:
+            right.append(("", "pad"))
+
+        if mode == "all":
+            show = list(range(n))
+        elif not self._diff_context.get():
+            show = list(self._diff_change_rows)
+            if not show:
+                show = list(range(n))  # nothing changed — show all
+        else:
+            if not self._diff_change_rows:
+                show = list(range(n))
+            else:
+                left_cmt = comment_flags(left)
+                right_cmt = comment_flags(right)
+                before = spin_value(self._ctx_before, 5)
+                after = spin_value(self._ctx_after, 5)
+                c_before = spin_value(self._ctx_cmt_before, 2)
+                c_after = spin_value(self._ctx_cmt_after, 2)
+
+                keep = set()
+                for h0, h1 in self._diff_hunks():
+                    only_comments = all(left_cmt[i] and right_cmt[i] for i in range(h0, h1 + 1))
+                    b_ctx, a_ctx = (c_before, c_after) if only_comments else (before, after)
+                    keep.update(range(max(0, h0 - b_ctx), min(n - 1, h1 + a_ctx) + 1))
+                show = sorted(keep)
+
+        self._diff_display_to_full = show
+        left_view, right_view = with_width_pad(
+            [left[i] for i in show], [right[i] for i in show]
+        )
+        self._set_diff_text(self.diff_left, left_view)
+        self._set_diff_text(self.diff_right, right_view)
+
+    def _diff_hunks(self):
+        """Group consecutive changed rows into blocks: [(first_row, last_row), ...] in full-list indices."""
+        hunks = []
+        for row in self._diff_change_rows:
+            if hunks and row == hunks[-1][1] + 1:
+                hunks[-1] = (hunks[-1][0], row)
+            else:
+                hunks.append((row, row))
+        return hunks
+
+    def _scroll_to_display_row(self, display_row, end_row=None):
+        """Scroll both panes to display_row and flash the whole block (display_row..end_row)."""
+        if display_row < 0:
+            return
+        line = display_row + 1
+        end_line = (end_row if end_row is not None else display_row) + 1
+        for w in (self.diff_left, self.diff_right):
+            w.configure(state="normal")
+            w.see("%d.0" % line)
+            w.tag_remove("current_change", "1.0", tk.END)
+            w.tag_add("current_change", "%d.0" % line, "%d.end" % end_line)
+            w.configure(state="disabled")
+        self.root.after(
+            1200,
+            lambda: (
+                self.diff_left.tag_remove("current_change", "1.0", tk.END),
+                self.diff_right.tag_remove("current_change", "1.0", tk.END),
+            ),
+        )
+
+    def diff_next_change(self):
+        hunks = self._diff_hunks()
+        if not hunks:
+            return
+        self._diff_nav_index = (self._diff_nav_index + 1) % len(hunks)
+        self._goto_change_nav(hunks[self._diff_nav_index])
+
+    def diff_prev_change(self):
+        hunks = self._diff_hunks()
+        if not hunks:
+            return
+        if self._diff_nav_index < 0:
+            self._diff_nav_index = len(hunks) - 1
+        else:
+            self._diff_nav_index = (self._diff_nav_index - 1) % len(hunks)
+        self._goto_change_nav(hunks[self._diff_nav_index])
+
+    def _goto_change_nav(self, hunk):
+        """Scroll to a block (first_row, last_row) given in full-list indices."""
+        first, last = hunk
+        if first not in self._diff_display_to_full:
+            self._diff_mode.set("all")
+            self._apply_diff_view()
+        try:
+            d_first = self._diff_display_to_full.index(first)
+            d_last = self._diff_display_to_full.index(last)
+        except ValueError:
+            return
+        self._scroll_to_display_row(d_first, d_last)
 
 if __name__ == "__main__":
     root = tk.Tk()
