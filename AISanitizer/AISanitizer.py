@@ -22,6 +22,7 @@ CLIP_POLL_MS = 600
 # --------------------------------------------------------------------------
 PLACEHOLDER_RE = re.compile(r"\[([A-Z]+_\d+)\]")
 FULL_PH_RE = re.compile(r"\[[A-Z]+_\d+\]")
+HILITE_RE = re.compile(FULL_PH_RE.pattern + r"|\bxxx\b")
 SKIP_VALUES = {"true", "false", "null", "none", "undefined"}
 SAFE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 AUTH_SCHEMES = {"bearer", "basic", "digest", "token", "negotiate", "apikey", "ntlm"}
@@ -284,6 +285,7 @@ DEFAULT_CFG = {
     "mask_emails": True,
     "mask_paths": False,
     "reversible": True,
+    "highlight_diff": True,
 }
 
 
@@ -332,6 +334,8 @@ class App:
         self.emails_var = tk.BooleanVar(value=self.cfg["mask_emails"])
         self.paths_var = tk.BooleanVar(value=self.cfg["mask_paths"])
         self.reversible_var = tk.BooleanVar(value=self.cfg["reversible"])
+        self.highlight_var = tk.BooleanVar(value=self.cfg["highlight_diff"])
+        self.highlight_var.trace_add("write", lambda *a: self._highlight(self.out_box))
         self.watch_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Paste text on the left and click Sanitize.")
 
@@ -366,6 +370,7 @@ class App:
             ("IPs", self.ips_var),
             ("Emails", self.emails_var),
             ("URL paths", self.paths_var),
+            ("Highlight changes", self.highlight_var),
             ("Reversible (placeholders). Untick for plain xxx", self.reversible_var),
         ):
             tk.Checkbutton(opts, text=text, variable=var, font=("Calibri", 10)).pack(side="left", padx=(0, 12))
@@ -385,6 +390,7 @@ class App:
         t1 = tk.Frame(nb)
         nb.add(t1, text="  Sanitize (before sending)  ")
         self.in_box, self.out_box = self._pane_pair(t1, "Original (paste here)", "Sanitized (safe to send)")
+        self.out_box.tag_configure("diff", background="#FFF3A3", foreground="#8A1C1C")
         b1 = tk.Frame(t1)
         b1.grid(row=1, column=0, columnspan=2, pady=6)
         self._btn(b1, "Sanitize  >", self.sanitize_clicked, "#28a745", "#218838", bold=True)
@@ -453,6 +459,13 @@ class App:
         for b in boxes:
             b.delete("1.0", "end")
 
+    def _highlight(self, box):
+        box.tag_remove("diff", "1.0", "end")
+        if not self.highlight_var.get():
+            return
+        for m in HILITE_RE.finditer(self._get(box)):
+            box.tag_add("diff", f"1.0+{m.start()}c", f"1.0+{m.end()}c")        
+
     def _copy(self, box):
         self.root.clipboard_clear()
         self.root.clipboard_append(self._get(box))
@@ -483,6 +496,7 @@ class App:
             mask_emails=self.emails_var.get(),
             mask_paths=self.paths_var.get(),
             reversible=self.reversible_var.get(),
+            highlight_diff=self.highlight_var.get(),
         )
         try:
             save_config(self.cfg)
@@ -495,6 +509,7 @@ class App:
         if not text.strip():
             return
         self._set(self.out_box, self._run_sanitize(text))
+        self._highlight(self.out_box)
         self.status_var.set(self.san.summary() + "  - always skim the result before sending.")
 
     def paste_sanitize_copy(self):
@@ -506,6 +521,7 @@ class App:
         self._set(self.in_box, text)
         out = self._run_sanitize(text)
         self._set(self.out_box, out)
+        self._highlight(self.out_box)
         self._copy(self.out_box)
         self.status_var.set(self.san.summary() + "  - sanitized text is now on your clipboard.")
 
@@ -588,6 +604,7 @@ class App:
                     out = self._run_sanitize(clip)
                     self._set(self.in_box, clip)
                     self._set(self.out_box, out)
+                    self._highlight(self.out_box)
                     if out != clip:
                         self.root.clipboard_clear()
                         self.root.clipboard_append(out)

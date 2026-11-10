@@ -28,6 +28,8 @@ LABEL_FONT = (FONT, 10)
 
 # How many recent sample URLs to keep in the dropdown
 MAX_RECENT_URLS = 5
+# How many recent CRF numbers to keep in the dropdown
+MAX_RECENT_CRFS = 10
 
 
 def _darken(hex_color, factor=0.88):
@@ -298,7 +300,7 @@ def resource_path(relative_path):
 
 
 CONFIG_FILE = os.path.join(resource_base_dir(), "sp_generator_config.json")
-CONFIG_KEYS = ("crf_root", "crf_number", "sit_folder", "sample_urls")
+CONFIG_KEYS = ("crf_root", "crf_number", "crf_numbers", "sit_folder", "sample_urls")
 
 
 def load_config():
@@ -319,6 +321,8 @@ def load_config():
                         result[k] = []
                 elif isinstance(v, str):
                     result[k] = v
+                elif k == "crf_numbers":
+                    result[k] = [c for c in v if isinstance(c, str) and c.strip()] if isinstance(v, list) else []
             return result
     except (OSError, ValueError):
         pass
@@ -450,13 +454,60 @@ def name_problem(expected, sql_text, label):
 #               COMPARE WINDOW (full screen / multi-file)
 # ============================================================
 
+def replace_rows(old_chunk, new_chunk, threshold=0.6):
+    """Align an uneven replace block: pair similar lines (shown as 'replace'),
+    the rest become pure delete / insert."""
+    left, right, j = [], [], 0
+    for o in old_chunk:
+        best, best_r = None, threshold
+        for k in range(j, len(new_chunk)):
+            r = difflib.SequenceMatcher(None, o, new_chunk[k], autojunk=False).ratio()
+            if r > best_r:
+                best, best_r = k, r
+        if best is None:
+            left.append((o, "delete"))
+            right.append(("", "pad"))
+            continue
+        for t in new_chunk[j:best]:
+            left.append(("", "pad"))
+            right.append((t, "insert"))
+        left.append((o, "replace"))
+        right.append((new_chunk[best], "replace"))
+        j = best + 1
+    for t in new_chunk[j:]:
+        left.append(("", "pad"))
+        right.append((t, "insert"))
+    return left, right
+
+
+def paint_inline(left_w, right_w, left_rows, right_rows):
+    """Highlight the exact characters that differ on paired 'replace' rows."""
+    for w in (left_w, right_w):
+        w.configure(state="normal")
+        w.tag_remove("inline", "1.0", tk.END)
+    for idx, ((lt, ltag), (rt, rtag)) in enumerate(zip(left_rows, right_rows), start=1):
+        if ltag != "replace" or rtag != "replace":
+            continue
+        sm = difflib.SequenceMatcher(None, lt, rt, autojunk=False)
+        for op, i1, i2, j1, j2 in sm.get_opcodes():
+            if op == "equal":
+                continue
+            if i2 > i1:
+                left_w.tag_add("inline", "%d.%d" % (idx, i1), "%d.%d" % (idx, i2))
+            if j2 > j1:
+                right_w.tag_add("inline", "%d.%d" % (idx, j1), "%d.%d" % (idx, j2))
+    for w in (left_w, right_w):
+        w.configure(state="disabled")
+
 def build_diff_rows(old, new):
     """Align two scripts side by side.
     Returns (left_rows, right_rows, change_rows); rows are (text, tag), equal length."""
     if not old.strip():
-        right = [(line, "equal") for line in new.splitlines()] or [("", "equal")]
+        lines = new.splitlines()
+        right = [(line, "insert") for line in lines] or [("", "equal")]
         left = [("(no backup — New SP)", "pad")] + [("", "pad")] * (len(right) - 1)
-        return left, right, []
+        change_rows = list(range(len(lines)))
+        return left, right, change_rows
 
     old_lines, new_lines = old.splitlines(), new.splitlines()
     left, right = [], []
@@ -468,6 +519,10 @@ def build_diff_rows(old, new):
         elif tag == "replace" and (i2 - i1) == (j2 - j1):
             left += [(t, "replace") for t in old_lines[i1:i2]]
             right += [(t, "replace") for t in new_lines[j1:j2]]
+        elif tag == "replace":                      # NEW
+            l, r = replace_rows(old_lines[i1:i2], new_lines[j1:j2])
+            left += l
+            right += r
         else:  # delete / insert / uneven replace
             left += [(t, "delete") for t in old_lines[i1:i2]] + [("", "pad")] * (j2 - j1)
             right += [("", "pad")] * (i2 - i1) + [(t, "insert") for t in new_lines[j1:j2]]
@@ -537,11 +592,17 @@ class CompareWindow(tk.Toplevel):
         make_button(inner, "Next File ▶", lambda: self.show_item(self.index + 1),
                     COLOR_PURPLE, pady=4, padx=10, font_size=9).pack(side="left", padx=(6, 12))
 
+        names = [name for name, _old, _new in self.items]
+        # measure the longest name so the dropdown never truncates
+        max_chars = max((len(n) for n in names), default=40)
+        # Sensible range: never narrower than 45, never wider than 70
+        width = min(max(max_chars + 1, 45), 70)
+
         self.file_combo = ttk.Combobox(
-            inner, state="readonly", font=LABEL_FONT, width=50,
-            values=[name for name, _old, _new in self.items],
+            inner, state="readonly", font=LABEL_FONT, width=width,
+            values=names,
         )
-        self.file_combo.pack(side="left")
+        self.file_combo.pack(side="left", padx=(0, 8))
         self.file_combo.bind("<<ComboboxSelected>>", lambda _e: self.show_item(self.file_combo.current()))
 
         self.status_lbl = tk.Label(inner, font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_MUTED)
@@ -639,8 +700,15 @@ class CompareWindow(tk.Toplevel):
         w.tag_configure("delete", background="#fee2e2", foreground="#7f1d1d")
         w.tag_configure("replace", background="#fef9c3", foreground="#713f12")
         w.tag_configure("pad", background="#f1f5f9", foreground="#94a3b8")
+        # w.tag_configure("inline", background="#fde047", foreground="#422006")
         w.tag_configure("current_change", background="#93c5fd")
+        # w.tag_raise("sel")
+
+        w.tag_configure("inline", background="#facc15", foreground="#422006")
+        w.tag_raise("inline")          # above the line-level replace colour
+        w.tag_raise("current_change")  # keep navigation highlight on top
         w.tag_raise("sel")
+
         w.configure(state="disabled")
         return w
 
@@ -693,10 +761,12 @@ class CompareWindow(tk.Toplevel):
 
         self.file_combo.current(i)
         self.title("Compare Files - %s  (%d / %d)" % (name, i + 1, len(self.items)))
-        if self.hunks:
+        if not old.strip():
+            info = "new SP"
+        elif self.hunks:
             info = "%d change block(s)" % len(self.hunks)
         else:
-            info = "identical" if old.strip() else "new SP"
+            info = "identical"
         self.status_lbl.config(text="%d / %d    %s" % (i + 1, len(self.items), info))
 
         self.repaint()
@@ -734,6 +804,7 @@ class CompareWindow(tk.Toplevel):
         )
         self._paint(self.left, left_view)
         self._paint(self.right, right_view)
+        paint_inline(self.left, self.right, left_view, right_view)
 
     @staticmethod
     def _paint(widget, rows):
@@ -797,6 +868,12 @@ class SPFileGenerator:
         # Recent sample URLs for the URL generator dropdown (most recent first)
         self.sample_urls = list(cfg.get("sample_urls") or [])
 
+        # Recent CRF numbers for the dropdown (most recent first)
+        self.crf_numbers = list(cfg.get("crf_numbers") or [])
+        last_crf = cfg.get("crf_number", "").strip()
+        if last_crf and last_crf.lower() not in [c.lower() for c in self.crf_numbers]:
+            self.crf_numbers.insert(0, last_crf)   # migrate existing single saved value
+
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -805,6 +882,7 @@ class SPFileGenerator:
             save_config({
                 "crf_root": self.crf_root_var.get().strip(),
                 "crf_number": self.crf_var.get().strip(),
+                "crf_numbers": self.crf_numbers[:MAX_RECENT_CRFS],
                 "sit_folder": self.sit_folder_var.get().strip(),
                 "sample_urls": self.sample_urls[:MAX_RECENT_URLS],
             })
@@ -819,6 +897,15 @@ class SPFileGenerator:
         # Keep unique, most-recent first
         self.sample_urls = [url] + [u for u in self.sample_urls if u.lower() != url.lower()]
         self.sample_urls = self.sample_urls[:MAX_RECENT_URLS]
+        self.save_settings()
+
+    def remember_crf_number(self, crf):
+        """Push crf to the front of the recent CRF numbers (deduped) and persist."""
+        crf = (crf or "").strip()
+        if not crf:
+            return
+        self.crf_numbers = ([crf] + [c for c in self.crf_numbers if c.lower() != crf.lower()])[:MAX_RECENT_CRFS]
+        self.crf_combo["values"] = self.crf_numbers
         self.save_settings()
 
     def on_close(self):
@@ -855,29 +942,40 @@ class SPFileGenerator:
 
         backup_dir = os.path.join(output_dir, "Backup")
         items = []
-        if os.path.isdir(backup_dir):
-            for name in sorted(os.listdir(backup_dir), key=str.lower):
-                low = name.lower()
-                if not low.endswith(".sql") or low.endswith("_old.sql"):
-                    continue
-                new_path = os.path.join(output_dir, name)
-                if not os.path.isfile(new_path):
-                    continue
-                try:
-                    items.append((name[:-4], read_sql(os.path.join(backup_dir, name)), read_sql(new_path)))
-                except Exception as ex:
-                    messagebox.showerror("Read Failed", name + ": " + str(ex))
-                    return
+        for name in sorted(os.listdir(output_dir), key=str.lower):
+            low = name.lower()
+            if not low.endswith(".sql") or low.endswith("_old.sql"):
+                continue
+            new_path = os.path.join(output_dir, name)
+            if not os.path.isfile(new_path):
+                continue
+            backup_path = os.path.join(backup_dir, name)
+            try:
+                if os.path.isfile(backup_path):
+                    old_text, label = read_sql(backup_path), name[:-4]
+                else:
+                    old_text, label = "", name[:-4] + "  [New]"   # no backup -> new SP
+                items.append((label, old_text, read_sql(new_path)))
+            except Exception as ex:
+                messagebox.showerror("Read Failed", name + ": " + str(ex))
+                return
+
+        # Modified SPs first, new SPs below; alphabetical within each group
+        items.sort(key=lambda item: (item[0].endswith("  [New]"), item[0].lower()))
 
         if not items:
             messagebox.showinfo(
                 "Compare Files",
-                "No modified SPs found.\n\nA SP needs a file in SIT Scripts and a matching file in SIT Scripts\\Backup.",
+                "No SQL files found in the SIT Scripts folder.",
             )
             return
 
         current = clean_sp_name(self.sp_name_var.get()).lower()
-        start = next((i for i, item in enumerate(items) if item[0].lower() == current), 0)
+        start = next(
+            (i for i, item in enumerate(items)
+             if item[0].replace("  [New]", "").lower() == current),
+            0,
+        )
         CompareWindow(self, items, start)    
 
     def _build_ui(self):
@@ -891,9 +989,12 @@ class SPFileGenerator:
         top.columnconfigure(2, minsize=170)  # keeps the right-hand buttons the same width
 
         make_field_label(top, "CRF Number").grid(row=0, column=0, sticky="w", padx=(0, 14), pady=5)
-        crf_entry = make_entry(top, textvariable=self.crf_var)
+        self.crf_combo = ttk.Combobox(top, textvariable=self.crf_var, font=LABEL_FONT,
+                                      values=self.crf_numbers)
+        crf_entry = self.crf_combo
         crf_entry.grid(row=0, column=1, sticky="ew", pady=5, ipady=5)
         crf_entry.bind("<Return>", lambda _event: self.resolve_sit_folder())
+        crf_entry.bind("<<ComboboxSelected>>", lambda _event: self.resolve_sit_folder())
         make_button(top, "Find CRF SIT Folder", self.resolve_sit_folder, COLOR_TEAL, pady=6).grid(
             row=0, column=2, sticky="ew", padx=(10, 0), pady=5
         )
@@ -963,16 +1064,48 @@ class SPFileGenerator:
         bottom = tk.Frame(self.root, bg=COLOR_BG)
         bottom.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
 
-        make_button(bottom, "Verify SQL Files", self.verify_files, COLOR_PURPLE).pack(side="left")
-        make_button(bottom, "Open Folder", self.open_output_folder, COLOR_TEAL).pack(side="left", padx=(8, 0))
-        make_button(bottom, "Clear", self.clear_inputs, COLOR_ORANGE).pack(side="left", padx=(8, 0))
-        make_button(bottom, "Generate URLs", self.open_url_generator, COLOR_ACCENT).pack(side="left", padx=(8, 0))
-        make_button(bottom, "Compare Files", self.open_compare_files, COLOR_PURPLE).pack(side="left", padx=(8, 0))
+        # make_button(bottom, "Verify SQL Files", self.verify_files, COLOR_PURPLE).pack(side="left")
+        # make_button(bottom, "Open Folder", self.open_output_folder, COLOR_TEAL).pack(side="left", padx=(8, 0))
+        # make_button(bottom, "Clear", self.clear_inputs, COLOR_ORANGE).pack(side="left", padx=(8, 0))
+        # make_button(bottom, "Delete SP", self.delete_sp_files, "#dc2626").pack(side="left", padx=(8, 0))
+        # make_button(bottom, "Generate URLs", self.open_url_generator, COLOR_ACCENT).pack(side="left", padx=(8, 0))
+        # make_button(bottom, "Compare Files", self.open_compare_files, COLOR_PURPLE).pack(side="left", padx=(8, 0))
+        # self.generate_button = make_button(
+        #     bottom, "Generate SQL Files", self.generate, COLOR_GREEN,
+        #     font_size=12, bold=True, pady=10, padx=24
+        # )
+        # self.generate_button.pack(side="right")
+
+        # File actions
+        file_actions = tk.Frame(bottom, bg=COLOR_BG)
+        file_actions.pack(side="left")
+
+        make_button(file_actions, "Verify SQL Files", self.verify_files, COLOR_PURPLE).pack(side="left")
+        make_button(file_actions, "Open Folder", self.open_output_folder, COLOR_TEAL).pack(side="left", padx=(8, 0))
+        make_button(file_actions, "Generate URLs", self.open_url_generator, COLOR_ACCENT).pack(side="left", padx=(8, 0))
+        make_button(file_actions, "Compare Files", self.open_compare_files, COLOR_PURPLE).pack(side="left", padx=(8, 0))
+
+        # Separator between file actions and cleanup actions
+        tk.Frame(bottom, bg=COLOR_BORDER, width=5).pack(side="left", fill="y", padx=14, pady=5)
+
+        # Cleanup actions
+        cleanup_actions = tk.Frame(bottom, bg=COLOR_BG)
+        cleanup_actions.pack(side="left")
+
+        make_button(cleanup_actions, "Clear", self.clear_inputs, COLOR_ORANGE).pack(side="left")
+        make_button(cleanup_actions, "Delete SP", self.delete_sp_files, "#dc2626").pack(side="left", padx=(8, 0))
+
+        # Main action, kept at the far right
         self.generate_button = make_button(
-            bottom, "Generate SQL Files", self.generate, COLOR_GREEN,
-            font_size=12, bold=True, pady=10, padx=24
+            bottom,"Generate SQL Files",self.generate,COLOR_GREEN,
+            font_size=11,bold=True,pady=8.5,padx=20,
         )
         self.generate_button.pack(side="right")
+
+        # Separator between cleanup actions and the main action
+        tk.Frame(bottom, bg=COLOR_BORDER, width=1).pack(
+            side="right", fill="y", padx=14, pady=5
+        )
 
         # ---------- Notebook: Modified / Backup / Diff ----------
         self.notebook = ttk.Notebook(self.root)
@@ -1163,6 +1296,8 @@ class SPFileGenerator:
             messagebox.showerror("CRF Folder Not Found", str(ex))
             return
 
+        self.remember_crf_number(crf)
+
         # The CRF deployment folder is named "SIT Scripts".
         candidates = [
             os.path.join(crf_folder, "SIT Scripts"),
@@ -1271,7 +1406,7 @@ class SPFileGenerator:
         except Exception as ex:
             messagebox.showerror("Read Failed", str(ex))
 
-    def clear_inputs(self):
+    def clear_inputs(self, notify=True):
         # if not messagebox.askyesno("Clear", "Clear both SQL tabs and the SP name?"):
         #     return
         self._diff_full_left = []
@@ -1291,10 +1426,55 @@ class SPFileGenerator:
         self.rename_cb.grid_remove()
         self._opened_sp_path = None
         self.set_update_mode(False)
-        messagebox.showinfo(
-            "Clear",
-            "The form has been cleared to Generate SQL Files mode."
-        )
+        self.notebook.select(0)
+        if notify:
+            messagebox.showinfo(
+                "Clear",
+                "The form has been cleared to Generate SQL Files mode."
+            )
+
+    def delete_sp_files(self):
+        """Delete the SIT Scripts file and its Backup file (whichever exist) for the SP Name."""
+        output_dir = self.sit_folder_var.get().strip()
+        if not output_dir or not os.path.isdir(output_dir):
+            messagebox.showwarning(
+                "Output Folder Required",
+                "Select or find the exact CRF SIT output folder first.",
+            )
+            return
+
+        sp_name = clean_sp_name(self.sp_name_var.get())
+        if not sp_name:
+            messagebox.showwarning("SP Name Required", "Enter the stored procedure name.")
+            return
+
+        targets = [
+            path for path in (
+                os.path.join(output_dir, sp_name + ".sql"),
+                os.path.join(output_dir, "Backup", sp_name + ".sql"),
+            ) if os.path.isfile(path)
+        ]
+        if not targets:
+            messagebox.showinfo("Nothing to Delete", "No files found for " + sp_name + ".")
+            return
+
+        if not messagebox.askyesno(
+            "Delete SP Files",
+            "Permanently delete these file(s)?\n\n" + "\n".join(targets)
+            + "\n\nThis cannot be undone.",
+            icon="warning",
+        ):
+            return
+
+        try:
+            for path in targets:
+                os.remove(path)
+        except OSError as ex:
+            messagebox.showerror("Delete Failed", str(ex))
+            return
+
+        self.clear_inputs(notify=False)
+        messagebox.showinfo("Deleted", "Deleted:\n\n" + "\n".join(targets))
 
     def show_list_dialog(self, title, summary, rows):
         """rows: list of (sp_name, status) tuples."""
@@ -1718,8 +1898,14 @@ class SPFileGenerator:
             widget.tag_configure("delete", background="#fee2e2", foreground="#7f1d1d")   # red
             widget.tag_configure("replace", background="#fef9c3", foreground="#713f12")  # yellow
             widget.tag_configure("pad", background="#f1f5f9", foreground="#94a3b8")
+            widget.tag_configure("inline", background="#fde047", foreground="#422006")
             widget.tag_configure("current_change", background="#93c5fd")  # blue highlight for nav
 
+            widget.tag_raise("inline")          # above the line-level replace colour
+            widget.tag_raise("current_change")  # keep navigation highlight on top
+            widget.tag_raise("sel")
+
+           
     def _bind_diff_scroll_sync(self):
         """Keep left/right Diff panes scrolling together vertically."""
         def sync_from_left(*_args):
@@ -1784,13 +1970,10 @@ class SPFileGenerator:
                 right_rows.append((n, "replace"))
             return
 
-        # Structural change: do not force 1:1 yellow pairing
-        for line in old_chunk:
-            left_rows.append((line, "delete"))
-            right_rows.append(("", "pad"))
-        for line in new_chunk:
-            left_rows.append(("", "pad"))
-            right_rows.append((line, "insert"))
+        # Structural change: pair similar lines, rest is delete / insert
+        l, r = replace_rows(old_chunk, new_chunk)
+        left_rows.extend(l)
+        right_rows.extend(r)
 
     def refresh_diff(self):
         """Rebuild the full Diff alignment from Modified / Backup tabs, then apply view mode."""
@@ -1900,6 +2083,7 @@ class SPFileGenerator:
         )
         self._set_diff_text(self.diff_left, left_view)
         self._set_diff_text(self.diff_right, right_view)
+        paint_inline(self.diff_left, self.diff_right, left_view, right_view)
 
     def _diff_hunks(self):
         """Group consecutive changed rows into blocks: [(first_row, last_row), ...] in full-list indices."""
