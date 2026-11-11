@@ -57,6 +57,8 @@ from urllib.parse import quote, unquote, urlsplit
 APP_NAME = "PyCompare"
 APP_VERSION = "2.0"
 IS_WINDOWS = os.name == "nt"
+SCHEME_LABELS = {"FTP": "ftp", "FTPS (Explicit SSL)": "ftps", "FTPS (Implicit SSL)": "ftpis"}
+SCHEME_BY_VALUE = {v: k for k, v in SCHEME_LABELS.items()}
 
 
 # ============================================================
@@ -510,7 +512,7 @@ def apply_hunk(rows: Sequence[Row], hunk: Hunk, direction: str,
 # ============================================================
 
 FTP_TIMEOUT = 30.0
-FTP_SCHEMES = ("ftp", "ftps")
+FTP_SCHEMES = ("ftp", "ftps", "ftpis")
 MAX_REMOTE_READ = 64 * 1024 * 1024
 
 
@@ -553,7 +555,7 @@ class RemoteRef:
 
 
 def default_port(scheme: str) -> int:
-    return 21
+    return 990 if scheme == "ftpis" else 21
 
 
 def is_remote_path(path: str) -> bool:
@@ -867,6 +869,23 @@ def parse_list_line(line: str, now: Optional[float] = None) -> Optional[Tuple[st
 #   FTP / FTPS filesystem
 # ------------------------------------------------------------
 
+class ImplicitFTP_TLS(ftplib.FTP_TLS):
+    """FTPS where TLS starts as soon as the socket connects (port 990)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._sock: Optional[socket.socket] = None
+
+    @property
+    def sock(self) -> Optional[socket.socket]:
+        return self._sock
+
+    @sock.setter
+    def sock(self, value: Optional[socket.socket]) -> None:
+        if value is not None and not isinstance(value, ssl.SSLSocket):
+            value = self.context.wrap_socket(value, server_hostname=self.host)
+        self._sock = value
+
 class FtpFS(FileSystem):
     """A FileSystem backed by one FTP (or FTPS) connection.
 
@@ -888,20 +907,24 @@ class FtpFS(FileSystem):
 
     # ---------- connection ----------
     def _new_connection(self) -> ftplib.FTP:
-        p = self.profile
+        p = self.profile            #NEW
+        stage = "connecting"
         try:
-            if p.scheme == "ftps":
+            if p.scheme in ("ftps", "ftpis"):
                 context = ssl.create_default_context()
                 if not p.tls_verify:
                     context.check_hostname = False
                     context.verify_mode = ssl.CERT_NONE
-                ftp: ftplib.FTP = ftplib.FTP_TLS(timeout=self.timeout, context=context)
+                tls_cls = ImplicitFTP_TLS if p.scheme == "ftpis" else ftplib.FTP_TLS   # NEW
+                ftp: ftplib.FTP = tls_cls(timeout=self.timeout, context=context)       # was ftplib.FTP_TLS(...)
             else:
                 ftp = ftplib.FTP(timeout=self.timeout)
             ftp.encoding = p.encoding or "utf-8"
             ftp.connect(p.host, p.port)
+            stage = "TLS handshake / login"       # NEW
             ftp.login(p.user or "anonymous", p.password or "")
             if isinstance(ftp, ftplib.FTP_TLS):
+                stage = "PROT P"                  # NEW
                 ftp.prot_p()
             ftp.set_pasv(bool(p.passive))
             try:
@@ -916,7 +939,7 @@ class FtpFS(FileSystem):
         except ssl.SSLError as ex:
             raise RemoteError("TLS error talking to %s: %s" % (p.host, ex)) from ex
         except socket.timeout as ex:
-            raise RemoteError("Timed out connecting to %s:%d" % (p.host, p.port)) from ex
+            raise RemoteError("Timed out while %s on %s:%d" % (stage, p.host, p.port)) from ex
         except ftplib.all_errors as ex:          # already includes OSError
             raise RemoteError("Cannot connect to %s:%d - %s" % (p.host, p.port, ex)) from ex
 
@@ -1906,14 +1929,12 @@ class FtpProfilesDialog(ModalDialog):
         form.grid(row=0, column=1, sticky="nsew")
         form.columnconfigure(1, weight=1)
         row = 0
-        self.scheme_var = tk.StringVar(value="ftp")
+        self.scheme_var = tk.StringVar(value="FTP")
         ttk.Label(form, text="Protocol").grid(row=row, column=0, sticky="w", pady=3)
-        prow = ttk.Frame(form)
-        prow.grid(row=row, column=1, sticky="w", pady=3)
-        ttk.Radiobutton(prow, text="FTP", value="ftp", variable=self.scheme_var,
-                        command=self._scheme_changed).pack(side="left")
-        ttk.Radiobutton(prow, text="FTPS (explicit TLS)", value="ftps", variable=self.scheme_var,
-                        command=self._scheme_changed).pack(side="left", padx=(10, 0))
+        self.scheme_combo = ttk.Combobox(form, textvariable=self.scheme_var,
+                                         values=list(SCHEME_LABELS), state="readonly", width=24)
+        self.scheme_combo.grid(row=row, column=1, sticky="w", pady=3)
+        self.scheme_combo.bind("<<ComboboxSelected>>", lambda _e: self._scheme_changed())
         row += 1
         for key, label in self.FIELDS:
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 10))
@@ -1961,11 +1982,13 @@ class FtpProfilesDialog(ModalDialog):
             self.tree.insert("", "end", iid=str(i), text="  %s" % (p.name or p.host or "(unnamed)"))
 
     def _scheme_changed(self) -> None:
-        state = "!disabled" if self.scheme_var.get() == "ftps" else "disabled"
-        self.verify_cb.state([state])
+        scheme = SCHEME_LABELS.get(self.scheme_var.get(), "ftp")
+        self.verify_cb.state(["!disabled" if scheme in ("ftps", "ftpis") else "disabled"])
+        if self.vars["port"].get().strip() in ("", "21", "990"):
+            self.vars["port"].set(str(default_port(scheme)))
 
     def _load(self, p: FtpProfile) -> None:
-        self.scheme_var.set(p.scheme)
+        self.scheme_var.set(SCHEME_BY_VALUE.get(p.scheme, "FTP"))
         for key, _label in self.FIELDS:
             self.vars[key].set(str(getattr(p, key, "")))
         self.save_pw.set(p.save_password)
@@ -1975,7 +1998,7 @@ class FtpProfilesDialog(ModalDialog):
 
     def _collect(self) -> FtpProfile:
         p = FtpProfile()
-        p.scheme = self.scheme_var.get()
+        p.scheme = SCHEME_LABELS.get(self.scheme_var.get(), "ftp")
         p.name = self.vars["name"].get().strip()
         p.host = self.vars["host"].get().strip()
         try:

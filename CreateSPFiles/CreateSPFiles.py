@@ -550,9 +550,10 @@ class CompareWindow(tk.Toplevel):
     items: list of (name, old_text, new_text). Not transient on purpose, so the
     window keeps its own minimize / maximize buttons."""
 
-    def __init__(self, app, items, start=0, fullscreen=False):
+    def __init__(self, app, items, start=0, fullscreen=False, close_on_exit=False):
         super().__init__(app.root)
         self.app = app                      # shares the Diffs / Context settings with the main window
+        self.close_on_exit = close_on_exit  # True -> leaving full screen closes this window
         self.items = items
         self.index = 0
         self.left_rows, self.right_rows = [], []
@@ -747,6 +748,9 @@ class CompareWindow(tk.Toplevel):
         self.set_fullscreen(not bool(self.attributes("-fullscreen")))
 
     def set_fullscreen(self, on):
+        if not on and self.close_on_exit:
+            self.destroy()
+            return
         self.attributes("-fullscreen", on)
         self.fs_btn.config(text="Exit Full Screen (Esc)" if on else "Full Screen (F11)")
 
@@ -929,7 +933,7 @@ class SPFileGenerator:
             messagebox.showwarning("Modified SP Required", "Enter or open the modified SP script.")
             return
         name = clean_sp_name(self.sp_name_var.get()) or extract_sp_name(modified) or "Current SP"
-        CompareWindow(self, [(name, backup, modified)], fullscreen=True)
+        CompareWindow(self, [(name, backup, modified)], fullscreen=True, close_on_exit=True)
 
     def open_compare_files(self):
         output_dir = self.sit_folder_var.get().strip()
