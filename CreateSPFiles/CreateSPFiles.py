@@ -30,7 +30,7 @@ LABEL_FONT = (FONT, 10)
 MAX_RECENT_URLS = 5
 # How many recent CRF numbers to keep in the dropdown
 MAX_RECENT_CRFS = 10
-
+SCRIPT_FOLDERS = ("SIT Scripts", "Dev Scripts", "QA Scripts", "Staging Scripts")
 
 def _darken(hex_color, factor=0.88):
     hex_color = hex_color.lstrip("#")
@@ -89,17 +89,12 @@ def make_field_label(parent, text, bold=True, size=10, fg=COLOR_TEXT, bg=COLOR_C
 
 
 def make_check(parent, text, variable, command=None, fg=COLOR_TEXT):
-    return tk.Checkbutton(
+    return ttk.Checkbutton(
         parent,
         text=text,
         variable=variable,
         command=command,
-        font=(FONT, 10),
-        bg=COLOR_CARD,
-        fg=fg,
-        activebackground=COLOR_CARD,
-        selectcolor="#ffffff",
-        anchor="w",
+        style="Card.TCheckbutton" if fg == COLOR_TEXT else "Warn.TCheckbutton",
     )
 
 
@@ -119,7 +114,7 @@ def make_card(parent, title):
 
 
 def make_code_box(parent, **kwargs):
-    return ScrolledText(
+    box = ScrolledText(
         parent,
         font=("Consolas", 10),
         bg="#fafbfc",
@@ -135,6 +130,11 @@ def make_code_box(parent, **kwargs):
         pady=8,
         **kwargs
     )
+    box.vbar.pack_forget()                      # drop the classic scrollbar
+    sb = ttk.Scrollbar(box.frame, orient="vertical", command=box.yview)
+    sb.pack(side="right", fill="y")
+    box.configure(yscrollcommand=sb.set)
+    return box
 
 def bind_select_all(widget):
     def _select_all(event):
@@ -282,7 +282,53 @@ def apply_ttk_theme():
         darkcolor=[("focus", COLOR_ACCENT)],
         background=[("active", COLOR_BORDER)],
     )
+    style.configure(
+        "TScrollbar",
+        background="#cbd5e1", troughcolor=COLOR_BG, bordercolor=COLOR_BG,
+        lightcolor="#cbd5e1", darkcolor="#cbd5e1", arrowcolor=COLOR_MUTED, arrowsize=12,
+    )
+    style.map("TScrollbar", background=[("active", "#94a3b8")])
 
+    # Checkbutton / Radiobutton (Card = normal text, Warn = orange text)
+    for kind in ("Checkbutton", "Radiobutton"):
+        for name, fg in (("Card", COLOR_TEXT), ("Warn", "#9a3412")):
+            s = name + ".T" + kind
+            style.configure(
+                s,
+                background=COLOR_CARD,
+                foreground=fg,
+                font=(FONT, 10),
+                focuscolor=COLOR_CARD,
+                indicatorbackground="#ffffff",
+                indicatorforeground="#ffffff",
+                bordercolor=COLOR_BORDER,
+                lightcolor=COLOR_BORDER,
+                darkcolor=COLOR_BORDER,
+            )
+            style.map(
+                s,
+                background=[
+                    ("active", COLOR_CARD),
+                    ("selected", COLOR_CARD),
+                    ("!selected", COLOR_CARD),
+                ],
+                foreground=[
+                    ("disabled", COLOR_MUTED),
+                    ("selected", fg),
+                    ("!selected", fg),
+                ],
+                indicatorcolor=[
+                    ("selected", COLOR_ACCENT),
+                    ("pressed", COLOR_ACCENT),
+                    ("active", COLOR_ACCENT),
+                    ("!selected", "#ffffff"),
+                ],
+                indicatorbackground=[
+                    ("selected", COLOR_ACCENT),
+                    ("pressed", COLOR_ACCENT),
+                    ("!selected", "#ffffff"),
+                ],
+            )
 
 # ============================================================
 #               PATHS / CONFIG
@@ -300,7 +346,7 @@ def resource_path(relative_path):
 
 
 CONFIG_FILE = os.path.join(resource_base_dir(), "sp_generator_config.json")
-CONFIG_KEYS = ("crf_root", "crf_number", "crf_numbers", "sit_folder", "sample_urls")
+CONFIG_KEYS = ("crf_root", "crf_number", "crf_numbers", "sit_folder", "sample_urls", "script_folder")
 
 
 def load_config():
@@ -862,6 +908,8 @@ class SPFileGenerator:
         self.crf_root_var = tk.StringVar(value=cfg.get("crf_root") or CRF_ROOT)
         self.crf_var = tk.StringVar(value=cfg.get("crf_number", ""))
         self.sit_folder_var = tk.StringVar(value=cfg.get("sit_folder", ""))
+        saved_folder = cfg.get("script_folder")
+        self.script_folder_var = tk.StringVar(value=saved_folder if saved_folder in SCRIPT_FOLDERS else SCRIPT_FOLDERS[0])
         self.sp_name_var = tk.StringVar()
         self.is_new_var = tk.BooleanVar(value=False)
         # When True and is_new: on Generate, use SP name from Modified tab content
@@ -889,6 +937,7 @@ class SPFileGenerator:
                 "crf_numbers": self.crf_numbers[:MAX_RECENT_CRFS],
                 "sit_folder": self.sit_folder_var.get().strip(),
                 "sample_urls": self.sample_urls[:MAX_RECENT_URLS],
+                "script_folder": self.script_folder_var.get(),
             })
         except OSError:
             pass  # settings are a convenience; never block the tool
@@ -921,7 +970,7 @@ class SPFileGenerator:
         if not output_dir or not os.path.isdir(output_dir):
             messagebox.showwarning(
                 "Output Folder Required",
-                "Select or find the exact CRF SIT output folder first.",
+                "Select or find the exact CRF Scripts output folder first.",
             )
             return
         os.startfile(output_dir)
@@ -940,7 +989,7 @@ class SPFileGenerator:
         if not output_dir or not os.path.isdir(output_dir):
             messagebox.showwarning(
                 "Output Folder Required",
-                "Select or find the exact CRF SIT output folder first.",
+                "Select or find the exact CRF Scripts output folder first.",
             )
             return
 
@@ -970,7 +1019,7 @@ class SPFileGenerator:
         if not items:
             messagebox.showinfo(
                 "Compare Files",
-                "No SQL files found in the SIT Scripts folder.",
+                "No SQL files found in the " + self.script_folder_var.get() + " folder.",
             )
             return
 
@@ -999,7 +1048,7 @@ class SPFileGenerator:
         crf_entry.grid(row=0, column=1, sticky="ew", pady=5, ipady=5)
         crf_entry.bind("<Return>", lambda _event: self.resolve_sit_folder())
         crf_entry.bind("<<ComboboxSelected>>", lambda _event: self.resolve_sit_folder())
-        make_button(top, "Find CRF SIT Folder", self.resolve_sit_folder, COLOR_TEAL, pady=6).grid(
+        make_button(top, "Find CRF Scripts Folder", self.resolve_sit_folder, COLOR_TEAL, pady=6).grid(
             row=0, column=2, sticky="ew", padx=(10, 0), pady=5
         )
 
@@ -1009,7 +1058,7 @@ class SPFileGenerator:
             row=1, column=2, sticky="ew", padx=(10, 0), pady=5
         )
 
-        make_field_label(top, "Output SIT Folder").grid(row=2, column=0, sticky="w", padx=(0, 14), pady=5)
+        make_field_label(top, "Output Scripts Folder").grid(row=2, column=0, sticky="w", padx=(0, 14), pady=5)
         make_entry(top, textvariable=self.sit_folder_var).grid(row=2, column=1, sticky="ew", pady=5, ipady=5)
         make_button(top, "Browse", self.browse_sit_folder, COLOR_ACCENT, pady=6).grid(
             row=2, column=2, sticky="ew", padx=(10, 0), pady=5
@@ -1028,7 +1077,7 @@ class SPFileGenerator:
             "New SP (do not create Backup folder/file)",
             self.is_new_var,
             command=self.on_new_toggle,
-        ).grid(row=4, column=1, sticky="w", pady=(6, 0))
+        ).grid(row=4, column=1, sticky="w", pady=(10, 2))
 
         # Shown only when an existing single-file SP was opened (is_new).
         # If checked: on Generate use the SP name from the Modified tab script
@@ -1042,9 +1091,64 @@ class SPFileGenerator:
         self.rename_cb.grid(row=5, column=1, sticky="w", pady=(0, 0))
         self.rename_cb.grid_remove()  # hidden until an existing New SP is loaded
 
+        # make_field_label(top, "Scripts Folder").grid(row=6, column=0, sticky="w", padx=(0, 14), pady=(8, 0))
+        # folder_row = tk.Frame(top, bg=COLOR_CARD)
+        # folder_row.grid(row=6, column=1, sticky="w", pady=(8, 0))
+        
+        # #Scripts Folders - Radio Buttons
+        # for name in SCRIPT_FOLDERS:
+        #     ttk.Radiobutton(
+        #         folder_row, text=name, variable=self.script_folder_var, value=name,
+        #         command=self.on_script_folder_change, style="Card.TRadiobutton",
+        #     ).pack(side="left", padx=(0, 14))
+
+        # ---------- Scripts Folder (segmented control) ----------
+        make_field_label(top, "Scripts Folder").grid(row=6, column=0, sticky="w", padx=(0, 14), pady=(8, 0))
+
+        folder_row = tk.Frame(top, bg=COLOR_CARD)
+        folder_row.grid(row=6, column=1, sticky="w", pady=(8, 0))
+
+        def make_folder_btn(parent, text, value):
+            """Toggle-style button for Scripts Folder selection."""
+            btn = tk.Radiobutton(
+                parent,
+                text=text,
+                variable=self.script_folder_var,
+                value=value,
+                command=self.on_script_folder_change,
+                font=(FONT, 9, "bold"),
+                bg=COLOR_CARD,
+                fg=COLOR_TEXT,
+                activebackground=COLOR_CARD,
+                activeforeground=COLOR_TEXT,
+                selectcolor="#dbeafe",          # light blue when selected
+                indicatoron=False,              # hide the circle → looks like a button
+                relief="flat",
+                borderwidth=1,
+                padx=12,
+                pady=5,
+                cursor="hand2",
+            )
+            # subtle hover
+            def on_enter(e, b=btn, v=value):
+                if self.script_folder_var.get() != v:
+                    b.config(bg="#e0e7ff")
+            def on_leave(e, b=btn, v=value):
+                if self.script_folder_var.get() != v:
+                    b.config(bg=COLOR_CARD)
+                else:
+                    b.config(bg="#dbeafe")
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+            return btn
+
+        for i, name in enumerate(SCRIPT_FOLDERS):
+            btn = make_folder_btn(folder_row, name, name)
+            btn.pack(side="left", padx=(0 if i == 0 else 2, 0))
+
         note = (
-            "Enter the SP name and click Open SP Files: the modified script is read from SIT Scripts and "
-            "the previous version from SIT Scripts\\Backup (if it exists; otherwise it is treated as a new SP). "
+            "Enter the SP name and click Open SP Files: the modified script is read from the selected Scripts Folder (Dev/SIT/QA/Staging) and "
+            "the previous version from the selected Scripts Folder (Dev/SIT/QA/Staging)\\Backup (if it exists; otherwise it is treated as a new SP). "
             "To create files, paste the scripts in the tabs; the name is detected from CREATE/ALTER PROCEDURE "
             "when SP Name is empty. When a single-file (New) SP is opened, the rename checkbox appears — "
             "check it to take the procedure name from the Modified tab and rename the file on disk."
@@ -1061,7 +1165,7 @@ class SPFileGenerator:
             pady=8,
             anchor="w",
         )
-        note_label.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        note_label.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         top.bind("<Configure>", lambda e: note_label.config(wraplength=max(300, e.width - 30)))
 
         # ---------- Bottom action bar (packed first so it is never pushed off-screen) ----------
@@ -1284,9 +1388,29 @@ class SPFileGenerator:
             self.crf_root_var.set(folder)
 
     def browse_sit_folder(self):
-        folder = filedialog.askdirectory(title="Select CRF SIT output folder")
+        folder = filedialog.askdirectory(title="Select CRF Scripts output folder")
         if folder:
             self.sit_folder_var.set(folder)
+            if os.path.basename(folder) in SCRIPT_FOLDERS:
+                self.script_folder_var.set(os.path.basename(folder))
+
+    def on_script_folder_change(self):
+        # Keep the pasted/opened scripts (so SIT content can be re-targeted to QA),
+        # but forget the opened file path so a rename can never delete a file in the other folder.
+        self._opened_sp_path = None
+        self.rename_from_script_var.set(False)
+        self.rename_cb.grid_remove()
+        self.set_update_mode(False)
+        self.save_settings()
+        if self.crf_var.get().strip():
+            self.resolve_sit_folder()
+            current = os.path.basename(self.sit_folder_var.get().rstrip("\\/"))
+            if current in SCRIPT_FOLDERS:
+                self.script_folder_var.set(current)
+        else:
+            current = os.path.basename(self.sit_folder_var.get().rstrip("\\/"))
+            if current in SCRIPT_FOLDERS:
+                self.script_folder_var.set(current)
 
     def resolve_sit_folder(self):
         crf = self.crf_var.get().strip()
@@ -1302,25 +1426,20 @@ class SPFileGenerator:
 
         self.remember_crf_number(crf)
 
-        # The CRF deployment folder is named "SIT Scripts".
-        candidates = [
-            os.path.join(crf_folder, "SIT Scripts"),
-        ]
-        existing = [path for path in candidates if os.path.isdir(path)]
-        if len(existing) == 1:
-            self.sit_folder_var.set(existing[0])
-        elif len(existing) > 1:
-            messagebox.showwarning(
-                "Select SIT Folder",
-                "More than one SIT folder was found. Please select the correct one using Browse.",
-            )
-        else:
-            messagebox.showwarning(
-                "SIT Folder Not Found",
-                "No SIT Scripts folder was found under:\n\n"
-                + crf_folder
-                + "\n\nUse Browse to select the exact CRF SIT folder.",
-            )
+        target = os.path.join(crf_folder, self.script_folder_var.get())
+        if not os.path.isdir(target):
+            if not messagebox.askyesno(
+                "Create Folder",
+                self.script_folder_var.get() + " does not exist under:\n\n" + crf_folder
+                + "\n\nCreate it?",
+            ):
+                return
+            try:
+                os.makedirs(target)
+            except OSError as ex:
+                messagebox.showerror("Create Failed", str(ex))
+                return
+        self.sit_folder_var.set(target)
 
     def on_new_toggle(self):
         if self.is_new_var.get():
@@ -1348,7 +1467,7 @@ class SPFileGenerator:
         if not output_dir or not os.path.isdir(output_dir):
             messagebox.showwarning(
                 "Output Folder Required",
-                "Enter a CRF number and click Find CRF SIT Folder first.",
+                "Enter a CRF number and click Find CRF Scripts Folder first.",
             )
             return
 
@@ -1400,7 +1519,7 @@ class SPFileGenerator:
                 messagebox.showinfo(
                     "New SP",
                     "No Backup file exists for " + sp_name + ".\n\n"
-                    "Opened the single SIT Scripts file and marked it as a New SP.\n\n"
+                    "Opened the single scripts file and marked it as a New SP.\n\n"
                     "If you change the procedure name inside the Modified tab, check\n"
                     "\"Rename file to match SP name in Modified tab\" so the file is\n"
                     "renamed (old file replaced) on Update.",
@@ -1443,7 +1562,7 @@ class SPFileGenerator:
         if not output_dir or not os.path.isdir(output_dir):
             messagebox.showwarning(
                 "Output Folder Required",
-                "Select or find the exact CRF SIT output folder first.",
+                "Select or find the exact CRF Scripts output folder first.",
             )
             return
 
@@ -1566,22 +1685,24 @@ class SPFileGenerator:
 
     def verify_files(self):
         """Check that every .sql file name matches the SP name inside it
-        (SIT Scripts and Backup folders), plus the open tabs if SP Name is set.
+        (selected scripts and backup folders), plus the open tabs if SP Name is set.
         Files ending with _old.sql are skipped (used for change tracking) and
         only listed as a note in the final popup."""
+
+        scripts_tag = self.script_folder_var.get()
         output_dir = self.sit_folder_var.get().strip()
         if not output_dir or not os.path.isdir(output_dir):
             messagebox.showwarning(
                 "Output Folder Required",
-                "Select or find the exact CRF SIT output folder first.",
+                "Select or find the exact CRF Scripts output folder first.",
             )
             return
 
         # problems, checked, old_files, sp_names = [], 0, [], []
         problems, checked, old_files = [], 0, []
-        names_by_tag = {"SIT Scripts": set(), "Backup": set()}
+        names_by_tag = {scripts_tag: set(), "Backup": set()}
 
-        for folder, tag in ((output_dir, "SIT Scripts"), (os.path.join(output_dir, "Backup"), "Backup")):
+        for folder, tag in ((output_dir, scripts_tag), (os.path.join(output_dir, "Backup"), "Backup")):
             if not os.path.isdir(folder):
                 continue
             for name in sorted(os.listdir(folder)):
@@ -1626,7 +1747,7 @@ class SPFileGenerator:
                 "Possible wrong file copied:\n\n" + "\n".join(problems) + old_note,
             )
         else:
-            new_sps = sorted(names_by_tag["SIT Scripts"] - names_by_tag["Backup"], key=str.lower)
+            new_sps = sorted(names_by_tag[scripts_tag] - names_by_tag["Backup"], key=str.lower)
             modified_sps = sorted(names_by_tag["Backup"], key=str.lower)
             rows = [(n, "New") for n in new_sps] + [(n, "Modified") for n in modified_sps]
 
@@ -1661,12 +1782,12 @@ class SPFileGenerator:
         win.transient(self.root)
 
         def _crf_folder_name():
-            """Derive CRF folder basename from Output SIT Folder (…/ECRF-xxx-…/SIT Scripts)."""
+            """Derive CRF folder basename from Output Scripts Folder (…/ECRF-xxx-…/SIT Scripts)."""
             sit = self.sit_folder_var.get().strip()
             if not sit:
                 return ""
             parent = os.path.dirname(sit)
-            if os.path.basename(sit).lower() == "sit scripts" and parent:
+            if os.path.basename(sit).lower() in {f.lower() for f in SCRIPT_FOLDERS} and parent:
                 return os.path.basename(parent)
             return ""
 
@@ -1771,7 +1892,7 @@ class SPFileGenerator:
         if not output_dir or not os.path.isdir(output_dir):
             messagebox.showwarning(
                 "Output Folder Required",
-                "Select or find the exact CRF SIT output folder first.",
+                "Select or find the exact CRF Scripts output folder first.",
             )
             return
         if not modified_sql:
@@ -1857,7 +1978,7 @@ class SPFileGenerator:
         ):
             if not messagebox.askyesno(
                 "File Exists",
-                sp_name + ".sql already exists in the SIT Scripts folder.\n\nOverwrite it?",
+                sp_name + ".sql already exists in the " + self.script_folder_var.get() + " folder.\n\nOverwrite it?",
             ):
                 return
 
