@@ -80,6 +80,7 @@ class TextFile:
     size: int = 0
     exists: bool = True
     raw: bytes = b""          # kept only for binary files (for byte comparison)
+    stamp: Optional[Tuple[int, float]] = None     # NEW: (size, mtime) at read time
 
     def describe(self) -> str:
         if not self.exists:
@@ -691,6 +692,15 @@ class FileSystem:
     def invalidate(self, path: str = "") -> None:
         pass
 
+    def invalidate_tree(self, path: str) -> None:
+        self.invalidate(path)
+
+    def cache_age(self) -> Optional[float]:
+        return None
+
+    def stamp_scan(self) -> None:
+        pass
+
     def close(self) -> None:
         pass
 
@@ -886,6 +896,7 @@ class ImplicitFTP_TLS(ftplib.FTP_TLS):
             value = self.context.wrap_socket(value, server_hostname=self.host)
         self._sock = value
 
+
 class FtpFS(FileSystem):
     """A FileSystem backed by one FTP (or FTPS) connection.
 
@@ -904,6 +915,7 @@ class FtpFS(FileSystem):
         self._cache: Dict[str, List[Node]] = {}
         self._mlsd: Optional[bool] = None       # None = not probed yet
         self._root = "/"
+        self.scan_time = 0.0
 
     # ---------- connection ----------
     def _new_connection(self) -> ftplib.FTP:
@@ -1052,9 +1064,24 @@ class FtpFS(FileSystem):
         with self._lock:
             if not path:
                 self._cache.clear()
+                self.scan_time = 0.0          # NEW
             else:
                 self._cache.pop(path, None)
                 self._cache.pop(self.dirname(path), None)
+
+    def invalidate_tree(self, path: str) -> None:
+        with self._lock:
+            prefix = path.rstrip("/") + "/"
+            for key in [k for k in self._cache if k == path or k.startswith(prefix)]:
+                del self._cache[key]
+            self._cache.pop(self.dirname(path), None)
+
+    def stamp_scan(self) -> None:
+        if not self.scan_time:
+            self.scan_time = time.time()
+
+    def cache_age(self) -> Optional[float]:
+        return time.time() - self.scan_time if self.scan_time else None
 
     def _find(self, path: str) -> Optional[Node]:
         parent = self.dirname(path)
@@ -1462,7 +1489,7 @@ def copy_entry(entry: FolderEntry, from_side: str, left_root: str, right_root: s
         copy_tree(src_fs, src, dst_fs, dst)
     else:
         copy_file(src_fs, src, dst_fs, dst)
-    dst_fs.invalidate(dst)
+    dst_fs.invalidate_tree(dst)      # was dst_fs.invalidate(dst)
     return dst
 
 
@@ -1475,7 +1502,7 @@ def delete_entry(entry: FolderEntry, side: str, lfs: FileSystem, rfs: FileSystem
         fs.rmtree(path)
     else:
         fs.remove(path)
-    fs.invalidate(path)
+    fs.invalidate_tree(path)         # was fs.invalidate(path)
 
 
 # ============================================================
@@ -1764,6 +1791,14 @@ def fmt_time(ts: Optional[float]) -> str:
     except (OSError, ValueError, OverflowError):
         return ""
 
+def fmt_age(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        return "%dm" % (s // 60)
+    return "%dh %dm" % (s // 3600, s % 3600 // 60)
+
 
 def short_path(path: str, width: int = 58) -> str:
     if len(path) <= width:
@@ -1934,7 +1969,7 @@ class FtpProfilesDialog(ModalDialog):
         self.scheme_combo = ttk.Combobox(form, textvariable=self.scheme_var,
                                          values=list(SCHEME_LABELS), state="readonly", width=24)
         self.scheme_combo.grid(row=row, column=1, sticky="w", pady=3)
-        self.scheme_combo.bind("<<ComboboxSelected>>", lambda _e: self._scheme_changed())
+        self.scheme_combo.bind("<<ComboboxSelected>>", lambda _e: self._scheme_picked())
         row += 1
         for key, label in self.FIELDS:
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 10))
@@ -1981,9 +2016,19 @@ class FtpProfilesDialog(ModalDialog):
         for i, p in enumerate(self.profiles):
             self.tree.insert("", "end", iid=str(i), text="  %s" % (p.name or p.host or "(unnamed)"))
 
+    # def _scheme_changed(self) -> None:
+    #     scheme = SCHEME_LABELS.get(self.scheme_var.get(), "ftp")
+    #     self.verify_cb.state(["!disabled" if scheme in ("ftps", "ftpis") else "disabled"])
+    #     if self.vars["port"].get().strip() in ("", "21", "990"):
+    #         self.vars["port"].set(str(default_port(scheme)))
+
     def _scheme_changed(self) -> None:
         scheme = SCHEME_LABELS.get(self.scheme_var.get(), "ftp")
         self.verify_cb.state(["!disabled" if scheme in ("ftps", "ftpis") else "disabled"])
+
+    def _scheme_picked(self) -> None:
+        self._scheme_changed()
+        scheme = SCHEME_LABELS.get(self.scheme_var.get(), "ftp")
         if self.vars["port"].get().strip() in ("", "21", "990"):
             self.vars["port"].set(str(default_port(scheme)))
 
@@ -2241,9 +2286,12 @@ class FolderTab(ttk.Frame):
         self._items: Dict[str, FolderEntry] = {}
         self._cancel = threading.Event()
         self._scan_id = 0
+        self._ysync = False
+        self._fs_pair: tuple = ()
+        self._reused = False
         self.ltarget = EMPTY_TARGET
         self.rtarget = EMPTY_TARGET
-        self.keymap: Dict[str, Callable[[], Any]] = {"<F5>": self.compare}
+        self.keymap: Dict[str, Callable[[], Any]] = {"<F5>": self.compare, "<Control-F5>": self.rescan}
 
         fo = app.cfg.get("folder_opts", {})
         self.lvar = tk.StringVar(value=left)
@@ -2313,6 +2361,7 @@ class FolderTab(ttk.Frame):
                             command=self.populate).pack(side="left", padx=(0, 3))
         ttk.Button(bar, text="Expand all", command=lambda: self._set_open(True)).pack(side="left", padx=(14, 3))
         ttk.Button(bar, text="Collapse all", command=lambda: self._set_open(False)).pack(side="left", padx=3)
+        ttk.Button(bar, text="Rescan  (Ctrl+F5)", command=self.rescan).pack(side="left", padx=(14, 3))
         ttk.Label(bar, text="Enter / double-click: compare file     Ctrl+→ / Ctrl+←: copy to right / left",
                   style="Muted.TLabel").pack(side="right")
 
@@ -2322,33 +2371,20 @@ class FolderTab(ttk.Frame):
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 10))
         body.rowconfigure(0, weight=1)
-        body.columnconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1, uniform="pane")
+        body.columnconfigure(1, weight=1, uniform="pane")
 
-        cols = ("status", "lsize", "lmod", "rsize", "rmod")
-        self.tree = ttk.Treeview(body, columns=cols, selectmode="extended")
-        self.tree.heading("#0", text="Name", anchor="w")
-        for col, text, width, anchor in (("status", "Status", 130, "w"), ("lsize", "Left size", 85, "e"),
-                                         ("lmod", "Left modified", 150, "w"), ("rsize", "Right size", 85, "e"),
-                                         ("rmod", "Right modified", 150, "w")):
-            self.tree.heading(col, text=text, anchor="w")
-            self.tree.column(col, width=width, anchor=anchor, stretch=False)  # type: ignore[arg-type]
-        self.tree.column("#0", width=380, stretch=True)
-        vbar = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
-        hbar = ttk.Scrollbar(body, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vbar.grid(row=0, column=1, sticky="ns")
-        hbar.grid(row=1, column=0, sticky="ew")
-
-        self.tree.bind("<Double-1>", self._on_double_click)
-        self.tree.bind("<Return>", lambda _e: self.open_selected())
-        self.tree.bind("<Button-3>", self._on_right_click)
-        self.tree.bind("<Control-a>", self._select_all)
+        self.vbar = ttk.Scrollbar(body, orient="vertical", command=lambda *a: self.tree.yview(*a))
+        self.vbar.grid(row=0, column=2, sticky="ns")
+        self.tree = self._make_tree(body, 0, (("lsize", "Size", 85, "e"), ("lmod", "Modified", 150, "w")))
+        self.rtree = self._make_tree(body, 1, (("rsize", "Size", 85, "e"), ("rmod", "Modified", 150, "w"),
+                                               ("status", "Status", 170, "w")))
         self.keymap["<Control-Right>"] = lambda: self.copy_selected("left")
         self.keymap["<Control-Left>"] = lambda: self.copy_selected("right")
 
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Compare files", command=self.open_selected)
+        self.menu.add_command(label="Refresh selected (re-list from server)", command=self.refresh_selected)
         self.menu.add_separator()
         self.menu.add_command(label="Copy to right  →", command=lambda: self.copy_selected("left"))
         self.menu.add_command(label="Copy to left  ←", command=lambda: self.copy_selected("right"))
@@ -2361,10 +2397,72 @@ class FolderTab(ttk.Frame):
         self.menu.add_command(label="Copy relative path", command=self.copy_rel_path)
         self.remote_menu = tk.Menu(self, tearoff=0)
 
+    def _make_tree(self, body: ttk.Frame, col: int, specs: tuple) -> ttk.Treeview:
+        tree = ttk.Treeview(body, columns=[s[0] for s in specs], selectmode="extended")
+        tree.heading("#0", text="Name", anchor="w")
+        for key, text, width, anchor in specs:
+            tree.heading(key, text=text, anchor="w")
+            tree.column(key, width=width, anchor=anchor, stretch=False)  # type: ignore[arg-type]
+        tree.column("#0", width=260, stretch=True)
+        hbar = ttk.Scrollbar(body, orient="horizontal", command=tree.xview)
+        tree.configure(xscrollcommand=hbar.set,
+                       yscrollcommand=lambda f, l: self._on_tree_yscroll(tree, f, l))
+        pad = (0, 4) if col == 0 else (0, 0)
+        tree.grid(row=0, column=col, sticky="nsew", padx=pad)
+        hbar.grid(row=1, column=col, sticky="ew", padx=pad)
+        tree.bind("<Double-1>", self._on_double_click)
+        tree.bind("<Return>", lambda _e: self.open_selected())
+        tree.bind("<Button-3>", self._on_right_click)
+        tree.bind("<Control-a>", self._select_all)
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._mirror_select(tree))
+        tree.bind("<<TreeviewOpen>>", lambda _e: self._mirror_open(tree, True))
+        tree.bind("<<TreeviewClose>>", lambda _e: self._mirror_open(tree, False))
+        return tree
+
+    def _other(self, tree: ttk.Treeview) -> ttk.Treeview:
+        return self.rtree if tree is self.tree else self.tree
+
+    def _on_tree_yscroll(self, tree: ttk.Treeview, first: Any, last: Any) -> None:
+        self.vbar.set(first, last)
+        other = self._other(tree)
+        if not self._ysync and other.yview()[0] != float(first):
+            self._ysync = True
+            try:
+                other.yview_moveto(float(first))
+            finally:
+                self._ysync = False
+
+    def _mirror_select(self, tree: ttk.Treeview) -> None:
+        other, sel = self._other(tree), tree.selection()
+        if tuple(other.selection()) != tuple(sel):
+            other.selection_set(sel)
+
+    def _mirror_open(self, tree: ttk.Treeview, value: bool) -> None:
+        item, other = tree.focus(), self._other(tree)
+        if item and other.exists(item) and bool(other.tk.getboolean(other.item(item, "open"))) != value:
+            other.item(item, open=value)
+
+    def rescan(self) -> None:
+        self.compare(full=True)
+
+    def refresh_selected(self) -> None:
+        ents = self._selected()
+        if not ents:
+            return
+        for e in ents:
+            for target in (self.ltarget, self.rtarget):
+                if target.is_remote and target.path:
+                    fs = self.app.fs_for(target)
+                    path = fs.join(target.root, *e.parts)
+                    fs.invalidate_tree(path) if e.is_dir else fs.invalidate(path)
+        self.compare()
+
     def apply_theme(self) -> None:
-        for status, key in ((S_SAME, "s_same"), (S_DIFF, "s_diff"), (S_LEFT_ONLY, "s_left"),
-                            (S_RIGHT_ONLY, "s_right"), (S_MISMATCH, "s_mismatch")):
-            self.tree.tag_configure(status, foreground=T[key])
+        for tree in (self.tree, self.rtree):
+            for status, key in ((S_SAME, "s_same"), (S_DIFF, "s_diff"), (S_LEFT_ONLY, "s_left"),
+                                (S_RIGHT_ONLY, "s_right"), (S_MISMATCH, "s_mismatch")):
+                tree.tag_configure(status, foreground=T[key])
+            tree.tag_configure("pad", foreground=T["muted"], background=T["pad_bg"])
         style_menu(self.menu)
         style_menu(self.remote_menu)
         for cb in (self.lcombo, self.rcombo, self.cmp_combo, self.ws_combo):
@@ -2396,7 +2494,7 @@ class FolderTab(ttk.Frame):
         )
 
     # ---------- comparing ----------
-    def compare(self) -> None:
+    def compare(self, full: bool = False) -> None:
         left, right = self.lvar.get().strip(), self.rvar.get().strip()
         if not left and not right:
             messagebox.showwarning("Folders Required", "Choose a left and a right folder first.")
@@ -2429,6 +2527,12 @@ class FolderTab(ttk.Frame):
         self.rcombo.configure(values=self.app.history("folder"))
         self.app.update_tab_title(self)
 
+        lfs, rfs = self.app.fs_for(ltarget), self.app.fs_for(rtarget)
+        if full:
+            lfs.invalidate()
+            rfs.invalidate()
+        self._fs_pair = (lfs, rfs)
+        self._reused = any(fs.cache_age() is not None for fs in self._fs_pair)
         self._cancel.set()                      # stop any scan still running
         self._cancel = threading.Event()
         cancel = self._cancel
@@ -2440,10 +2544,7 @@ class FolderTab(ttk.Frame):
         t0 = time.time()
 
         def worker() -> None:
-            lfs = rfs = None
             try:
-                lfs = ltarget.open()
-                rfs = rtarget.open()
                 res = compare_folders(ltarget.root, rtarget.root, opts, lfs, rfs,
                                       progress=lambda n: q.put(("progress", n)),
                                       is_cancelled=cancel.is_set)
@@ -2452,13 +2553,6 @@ class FolderTab(ttk.Frame):
                 q.put(("cancelled", None))
             except Exception as ex:
                 q.put(("error", str(ex)))
-            finally:
-                for fs in (lfs, rfs):
-                    if fs is not None:
-                        try:
-                            fs.close()
-                        except Exception:
-                            pass
 
         threading.Thread(target=worker, daemon=True).start()
         self.after(60, self._poll, q, scan_id, t0)
@@ -2477,10 +2571,15 @@ class FolderTab(ttk.Frame):
                     self.populate()
                     c = payload.counts
                     total = sum(c.values())
+                    for fs in self._fs_pair:
+                        fs.stamp_scan()
+                    ages = [a for a in (fs.cache_age() for fs in self._fs_pair) if a is not None]
+                    note = ("   |   remote listing is %s old - Ctrl+F5 rescans" % fmt_age(max(ages))
+                            if self._reused and ages else "")
                     self.status_var.set(
                         "%s files   |   %s identical   %s different   %s left only   %s right only"
                         "   |   %.1fs" % (f"{total:,}", f"{c['same']:,}", f"{c['diff'] + c['mismatch']:,}",
-                                          f"{c['left_only']:,}", f"{c['right_only']:,}", time.time() - t0))
+                                          f"{c['left_only']:,}", f"{c['right_only']:,}", time.time() - t0) + note)
                     finished = True
                 elif kind == "error":
                     messagebox.showerror("Compare Failed", str(payload))
@@ -2496,7 +2595,8 @@ class FolderTab(ttk.Frame):
             self.after(60, self._poll, q, scan_id, t0)
 
     def populate(self) -> None:
-        self.tree.delete(*self.tree.get_children())
+        for t in (self.tree, self.rtree):
+            t.delete(*t.get_children())
         self._items.clear()
         if not self.result:
             return
@@ -2510,12 +2610,18 @@ class FolderTab(ttk.Frame):
                 if e.status == S_DIFF and e.newer and not e.is_dir:
                     status += " (%s newer)" % e.newer
                 icon = "📁 " if e.is_dir else "📄 "
-                iid = self.tree.insert(
-                    parent, "end", text=icon + e.name, tags=(e.status,),
-                    open=bool(e.is_dir and (flt != FILTER_ALL or e.status != S_SAME)),
-                    values=(status, format_size(e.lsize), fmt_time(e.lmtime if not e.is_dir else None),
-                            format_size(e.rsize), fmt_time(e.rmtime if not e.is_dir else None)),
-                )
+                iid = str(len(self._items))
+                is_open = bool(e.is_dir and (flt != FILTER_ALL or e.status != S_SAME))
+                has_l, has_r = bool(e.lpath or e.error), bool(e.rpath)
+                self.tree.insert(parent, "end", iid=iid, open=is_open,
+                                 text=(icon + e.name) if has_l else "",
+                                 tags=(e.status if has_l else "pad",),
+                                 values=(format_size(e.lsize), fmt_time(e.lmtime if not e.is_dir else None)))
+                self.rtree.insert(parent, "end", iid=iid, open=is_open,
+                                  text=(icon + e.name) if has_r else "",
+                                  tags=(e.status if has_r else "pad",),
+                                  values=(format_size(e.rsize), fmt_time(e.rmtime if not e.is_dir else None),
+                                          status))
                 self._items[iid] = e
                 if e.children:
                     insert(iid, e.children)
@@ -2526,6 +2632,7 @@ class FolderTab(ttk.Frame):
         def walk(iid: str) -> None:
             for child in self.tree.get_children(iid):
                 self.tree.item(child, open=value)
+                self.rtree.item(child, open=value)
                 walk(child)
         walk("")
 
@@ -2583,21 +2690,11 @@ class FolderTab(ttk.Frame):
     # ---------- file operations ----------
     def _run_fs_op(self, title: str, work: Callable[[FileSystem, FileSystem], List[str]]) -> None:
         lt, rt = self.ltarget, self.rtarget
+        lfs, rfs = self.app.fs_for(lt), self.app.fs_for(rt)
         self.status_var.set(title + "…")
 
         def job() -> List[str]:
-            lfs = rfs = None
-            try:
-                lfs = lt.open()
-                rfs = rt.open()
-                return work(lfs, rfs)
-            finally:
-                for fs in (lfs, rfs):
-                    if fs is not None:
-                        try:
-                            fs.close()
-                        except Exception:
-                            pass
+            return work(lfs, rfs)
 
         def done(errors: List[str]) -> None:
             if errors:
@@ -2993,7 +3090,10 @@ class FileTab(ttk.Frame):
                     if not fs.isfile(target.root):
                         out[side] = TextFile(exists=False)
                     else:
-                        out[side] = parse_text_bytes(fs.read_bytes(target.root))
+                        stamp = fs.stat(target.root)                 # NEW (before the read)
+                        tf = parse_text_bytes(fs.read_bytes(target.root))
+                        tf.stamp = stamp
+                        out[side] = tf
                 finally:
                     try:
                         fs.close()
@@ -3559,9 +3659,18 @@ class FileTab(ttk.Frame):
         self.status_var.set("Saving %s…" % target.display())
         self.update_idletasks()
         fs = None
+        new_stamp = None
         try:
             fs = target.open()
+            if meta.exists and meta.stamp is not None:
+                current = fs.stat(target.root)
+                if current is not None and current != meta.stamp and not messagebox.askyesno(
+                        "File Changed", "%s was changed after you opened it.\n\n"
+                        "Overwrite it with your version?" % target.display(), icon="warning"):
+                    self.status_var.set("Save cancelled - press F5 to reload the newer version.")
+                    return False
             fs.write_bytes(target.root, data)
+            new_stamp = fs.stat(target.root)
         except (OSError, RemoteError) as ex:
             messagebox.showerror("Save Failed", "%s\n\n%s" % (target.display(), ex))
             return False
@@ -3572,6 +3681,8 @@ class FileTab(ttk.Frame):
                 except Exception:
                     pass
         fresh = parse_text_bytes(data)
+        fresh.stamp = new_stamp
+        self.app.invalidate_remote(target, target.root)
         if side == "left":
             self.lf = fresh
         else:
@@ -3811,13 +3922,14 @@ class App:
         self.profiles: List[FtpProfile] = [FtpProfile.from_dict(d)
                                            for d in cfg.get("ftp_profiles", []) if isinstance(d, dict)]
         self._session_passwords: Dict[str, str] = {}
+        self._fs_pool: Dict[str, FtpFS] = {}
 
         self._build_chrome()
         self.home = HomeTab(self)
         self.nb.add(self.home, text=self.home.title())
 
         for seq in ("<F5>", "<F7>", "<F8>", "<F3>", "<Shift-F3>", "<Control-s>", "<Control-z>",
-                    "<Control-f>", "<Control-Right>", "<Control-Left>", "<Alt-Right>", "<Alt-Left>"):
+                    "<Control-f>", "<Control-Right>", "<Control-Left>", "<Alt-Right>", "<Alt-Left>","<Control-F5>"):
             root.bind(seq, lambda e, s=seq: self._on_key(s, e))
         root.bind("<Control-n>", lambda _e: self.new_file_compare())
         root.bind("<Control-d>", lambda _e: self.new_folder_compare())
@@ -3828,6 +3940,29 @@ class App:
         root.bind("<Control-0>", lambda _e: self.change_font(0))
         root.protocol("WM_DELETE_WINDOW", self.on_exit)
         root.after(30, lambda: set_titlebar_dark(root, bool(T["dark"])))
+
+    def fs_for(self, target: FsTarget) -> FileSystem:
+        """One shared FtpFS per server, so its listing cache survives between compares."""
+        if target.profile is None:
+            return LocalFS()
+        key = target.profile.ref().key
+        fs = self._fs_pool.get(key)
+        if fs is None or fs.profile != target.profile:
+            if fs is not None:
+                fs.close()
+            fs = FtpFS(target.profile)
+            self._fs_pool[key] = fs
+        return fs
+
+    def invalidate_remote(self, target: FsTarget, path: str) -> None:
+        if target.profile is not None:
+            fs = self._fs_pool.get(target.profile.ref().key)
+            if fs is not None:
+                fs.invalidate(path)
+
+    def close_pool(self) -> None:
+        for fs in self._fs_pool.values():
+            fs.close()
 
     # ---------- chrome ----------
     def _build_chrome(self) -> None:
@@ -4113,7 +4248,7 @@ class App:
             "  Ctrl+W   Close tab (middle-click also works)\n"
             "  Ctrl +/-/0   Font size (Ctrl+wheel in a pane)\n\n"
             "Folder compare\n"
-            "  F5   Re-compare        Enter / double-click   Compare file\n"
+            "  F5   Re-compare        Ctrl+F5   Rescan from server        Enter / double-click   Compare file\n"
             "  Ctrl+→ / Ctrl+←   Copy selection to right / left\n\n"
             "File compare (both panes are editable - just type)\n"
             "  Alt+→ / Alt+←   Copy the current block to right / left\n"
@@ -4139,6 +4274,7 @@ class App:
         self.cfg["geometry"] = self.root.winfo_geometry()
         self.cfg["ftp_profiles"] = [p.to_dict() for p in self.profiles]
         save_config(self.cfg)
+        self.close_pool()
         self.root.destroy()
 
     # ---------- command line ----------
