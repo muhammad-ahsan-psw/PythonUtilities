@@ -565,6 +565,22 @@ def name_problem(expected, sql_text, label):
         return label + ": script is for '" + found + "' but expected '" + expected + "'."
     return None
 
+def extract_sp_action(sql_text):
+    """Return 'CREATE', 'ALTER' or 'CREATE OR ALTER' for the first procedure statement, else None."""
+    m = re.search(r"\b(CREATE\s+OR\s+ALTER|CREATE|ALTER)\s+PROC(?:EDURE)?\b", sql_text or "", re.IGNORECASE)
+    return re.sub(r"\s+", " ", m.group(1).upper()) if m else None
+
+def action_problem(label, sql_text, is_backup, has_backup):
+    """Backup must be CREATE. Scripts file must be ALTER when a backup exists, CREATE when it is a new SP."""
+    action = extract_sp_action(sql_text)
+    if is_backup and action == "ALTER":
+        return label + ": Backup should contain CREATE PROCEDURE but has ALTER."
+    if not is_backup and has_backup and action == "CREATE":
+        return label + ": has a Backup, so it should be ALTER PROCEDURE but has CREATE."
+    if not is_backup and not has_backup and action == "ALTER":
+        return label + ": new SP (no Backup), so it should be CREATE PROCEDURE but has ALTER."
+    return None
+
 # ============================================================
 #               COMPARE WINDOW (full screen / multi-file)
 # ============================================================
@@ -1715,6 +1731,12 @@ class SPFileGenerator:
                 issue = name_problem(name[:-4], content, tag + "\\" + name)
                 if issue:
                     problems.append(issue)
+                issue = action_problem(
+                    tag + "\\" + name, content, tag == "Backup",
+                    os.path.isfile(os.path.join(output_dir, "Backup", name)),
+                )
+                if issue:
+                    problems.append(issue)    
 
         sp_name = clean_sp_name(self.sp_name_var.get())
         if sp_name:
@@ -1724,6 +1746,11 @@ class SPFileGenerator:
             for label, text in tabs:
                 if text.strip():
                     issue = name_problem(sp_name, text, label)
+                    if issue:
+                        problems.append(issue)
+                    issue = action_problem(
+                        label, text, label.startswith("Backup"), not self.is_new_var.get()
+                    )
                     if issue:
                         problems.append(issue)
 
@@ -1737,7 +1764,7 @@ class SPFileGenerator:
         if problems:
             messagebox.showerror(
                 "Verification Failed",
-                "Possible wrong file copied:\n\n" + "\n".join(problems) + old_note,
+                "Scripts Folder: " + scripts_tag + "\n\nPossible wrong file copied:\n\n" + "\n".join(problems) + old_note,
             )
         else:
             new_sps = sorted(names_by_tag[scripts_tag] - names_by_tag["Backup"], key=str.lower)
@@ -1745,12 +1772,13 @@ class SPFileGenerator:
             rows = [(n, "New") for n in new_sps] + [(n, "Modified") for n in modified_sps]
 
             summary = (
-                "All " + str(checked) + " SQL file(s) match their stored procedure names.\n"
+                "Scripts Folder: " + scripts_tag + "\n"
+                + "All " + str(checked) + " SQL file(s) match their stored procedure names.\n"
                 + "New: " + str(len(new_sps))
                 + "    Modified: " + str(len(modified_sps))
                 + old_note
             )
-            self.show_list_dialog("Verified", summary, rows)
+            self.show_list_dialog("Verified - " + scripts_tag, summary, rows)
             # if len(rows) > 10:
             #     self.show_list_dialog(
             #         "Verified",
