@@ -24,6 +24,7 @@ COLOR_GREEN = "#16a34a"
 COLOR_TEAL = "#0d9488"
 COLOR_PURPLE = "#7c3aed"
 COLOR_ORANGE = "#ea580c"
+COLOR_CHECK = "#6366f1"   # indigo, matches the reference checkbox
 LABEL_FONT = (FONT, 10)
 
 # How many recent sample URLs to keep in the dropdown
@@ -89,14 +90,7 @@ def make_field_label(parent, text, bold=True, size=10, fg=COLOR_TEXT, bg=COLOR_C
 
 
 def make_check(parent, text, variable, command=None, fg=COLOR_TEXT):
-    return ttk.Checkbutton(
-        parent,
-        text=text,
-        variable=variable,
-        command=command,
-        style="Card.TCheckbutton" if fg == COLOR_TEXT else "Warn.TCheckbutton",
-    )
-
+    return ModernCheck(parent, text, variable, command, fg)
 
 def make_card(parent, title):
     card = tk.Frame(parent, bg=COLOR_CARD, highlightthickness=1, highlightbackground=COLOR_BORDER)
@@ -112,6 +106,81 @@ def make_card(parent, title):
     ).pack(fill="x")
     return card
 
+def make_chip(parent, text, variable, value=None, command=None):
+    """Segmented chip. value=None -> toggle (BooleanVar); otherwise radio (shared var)."""
+    is_radio = value is not None
+    kw = {"variable": variable, "command": command}
+    cls = tk.Checkbutton
+    if is_radio:
+        cls, kw["value"] = tk.Radiobutton, value
+    btn = cls(
+        parent, text=text, indicatoron=False, relief="flat", bd=0,
+        highlightthickness=1, highlightcolor=COLOR_ACCENT, takefocus=0,
+        font=(FONT, 9, "bold"), padx=14, pady=5, cursor="hand2", **kw
+    )
+    hover = [False]
+
+    def paint(*_):
+        on = (variable.get() == value) if is_radio else bool(variable.get())
+        if on:
+            bg, fg, border = COLOR_ACCENT, "white", COLOR_ACCENT
+        elif hover[0]:
+            bg, fg, border = "#eef2ff", COLOR_ACCENT, "#93c5fd"
+        else:
+            bg, fg, border = "#ffffff", COLOR_TEXT, COLOR_BORDER
+        btn.config(bg=bg, fg=fg, activebackground=bg, activeforeground=fg,
+                   selectcolor=bg, highlightbackground=border)
+
+    btn.bind("<Enter>", lambda _e: (hover.__setitem__(0, True), paint()))
+    btn.bind("<Leave>", lambda _e: (hover.__setitem__(0, False), paint()))
+    tid = variable.trace_add("write", paint)
+    btn.bind("<Destroy>", lambda _e: variable.trace_remove("write", tid), add="+")
+    paint()
+    return btn
+
+
+class ModernCheck(tk.Frame):
+    """Rounded checkbox like the reference image."""
+    S = 22
+
+    def __init__(self, parent, text, variable, command=None, fg=COLOR_TEXT):
+        super().__init__(parent, bg=COLOR_CARD, cursor="hand2")
+        self.variable, self.command, self.hover = variable, command, False
+        self.canvas = tk.Canvas(self, width=self.S, height=self.S, bg=COLOR_CARD,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack(side="left")
+        self.label = tk.Label(self, text=text, font=(FONT, 10, "bold"), bg=COLOR_CARD, fg=fg)
+        self.label.pack(side="left", padx=(10, 0))
+        for w in (self, self.canvas, self.label):
+            w.bind("<Button-1>", self._toggle)
+            w.bind("<Enter>", lambda _e: self._set_hover(True))
+            w.bind("<Leave>", lambda _e: self._set_hover(False))
+        tid = variable.trace_add("write", self._draw)
+        self.bind("<Destroy>", lambda _e: variable.trace_remove("write", tid), add="+")
+        self._draw()
+
+    def _set_hover(self, state):
+        self.hover = state
+        self._draw()
+
+    def _toggle(self, _e=None):
+        self.variable.set(not self.variable.get())
+        if self.command:
+            self.command()
+
+    def _draw(self, *_):
+        c, s = self.canvas, self.S
+        c.delete("all")
+        on = bool(self.variable.get())
+        fill = COLOR_CHECK if on else "#ffffff"
+        outline = COLOR_CHECK if on else ("#a5b4fc" if self.hover else "#d5d9e6")
+        x1, y1, x2, y2, r = 2, 2, s - 2, s - 2, 6
+        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+               x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        c.create_polygon(pts, smooth=True, fill=fill, outline=outline, width=2)
+        if on:
+            c.create_line(6, 11.5, 9.5, 15, 16, 7.5, fill="white", width=2.5,
+                          capstyle="round", joinstyle="round")
 
 def make_code_box(parent, **kwargs):
     box = ScrolledText(
@@ -663,16 +732,9 @@ class CompareWindow(tk.Toplevel):
         bar = tk.Frame(self, bg=COLOR_CARD)
         bar.pack(fill="x", padx=10, pady=(8, 0))
         for text, mode in (("All", "all"), ("Diffs", "diffs")):
-            tk.Radiobutton(
-                bar, text=text, variable=app._diff_mode, value=mode, command=self.repaint,
-                font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT, activebackground=COLOR_CARD,
-                selectcolor="#dbeafe", indicatoron=False, padx=10, pady=3, relief="flat", borderwidth=1,
-            ).pack(side="left", padx=(0, 2))
-        tk.Checkbutton(
-            bar, text="+ Context", variable=app._diff_context, command=self.on_context_toggle,
-            font=(FONT, 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT, activebackground=COLOR_CARD,
-            selectcolor="#dbeafe", indicatoron=False, padx=10, pady=3, relief="flat", borderwidth=1,
-        ).pack(side="left", padx=(0, 8))
+            make_chip(bar, text, app._diff_mode, mode, self.repaint).pack(side="left", padx=(0, 6))
+        make_chip(bar, "+ Context", app._diff_context, command=self.on_context_toggle).pack(side="left", padx=(0, 8))
+        
         make_button(bar, "Prev Change", self.prev_change, COLOR_TEAL,
                     pady=3, padx=10, font_size=9).pack(side="left", padx=(0, 4))
         make_button(bar, "Next Change", self.next_change, COLOR_TEAL,
@@ -1108,43 +1170,8 @@ class SPFileGenerator:
         folder_row = tk.Frame(top, bg=COLOR_CARD)
         folder_row.grid(row=6, column=1, sticky="w", pady=(8, 0))
 
-        def make_folder_btn(parent, text, value):
-            """Toggle-style button for Scripts Folder selection."""
-            btn = tk.Radiobutton(
-                parent,
-                text=text,
-                variable=self.script_folder_var,
-                value=value,
-                command=self.on_script_folder_change,
-                font=(FONT, 9, "bold"),
-                bg=COLOR_CARD,
-                fg=COLOR_TEXT,
-                activebackground=COLOR_CARD,
-                activeforeground=COLOR_TEXT,
-                selectcolor="#dbeafe",          # light blue when selected
-                indicatoron=False,              # hide the circle → looks like a button
-                relief="flat",
-                borderwidth=1,
-                padx=12,
-                pady=5,
-                cursor="hand2",
-            )
-            # subtle hover
-            def on_enter(e, b=btn, v=value):
-                if self.script_folder_var.get() != v:
-                    b.config(bg="#e0e7ff")
-            def on_leave(e, b=btn, v=value):
-                if self.script_folder_var.get() != v:
-                    b.config(bg=COLOR_CARD)
-                else:
-                    b.config(bg="#dbeafe")
-            btn.bind("<Enter>", on_enter)
-            btn.bind("<Leave>", on_leave)
-            return btn
-
         for i, name in enumerate(SCRIPT_FOLDERS):
-            btn = make_folder_btn(folder_row, name, name)
-            btn.pack(side="left", padx=(0 if i == 0 else 2, 0))
+            make_chip(folder_row, name, self.script_folder_var, name, self.on_script_folder_change).pack(side="left", padx=(0 if i == 0 else 6, 0))
 
         note = (
             "Enter the SP name and click Open SP Files: the modified script is read from the selected Scripts Folder (Dev/SIT/QA/Staging) and "
@@ -1250,43 +1277,9 @@ class SPFileGenerator:
         bind_select_all(self.modified_text)
         bind_select_all(self.backup_text)
 
-        def _mode_btn(text, mode):
-            return tk.Radiobutton(
-                mode_row,
-                text=text,
-                variable=self._diff_mode,
-                value=mode,
-                command=self._apply_diff_view,
-                font=(FONT, 9, "bold"),
-                bg=COLOR_CARD,
-                fg=COLOR_TEXT,
-                activebackground=COLOR_CARD,
-                selectcolor="#dbeafe",
-                indicatoron=False,
-                padx=10,
-                pady=3,
-                relief="flat",
-                borderwidth=1,
-            )
-
-        _mode_btn("All", "all").pack(side="left", padx=(0, 2))
-        _mode_btn("Diffs", "diffs").pack(side="left", padx=(0, 2))
-        tk.Checkbutton(
-            mode_row,
-            text="+ Context",
-            variable=self._diff_context,
-            command=self._on_context_toggle,
-            font=(FONT, 9, "bold"),
-            bg=COLOR_CARD,
-            fg=COLOR_TEXT,
-            activebackground=COLOR_CARD,
-            selectcolor="#dbeafe",
-            indicatoron=False,
-            padx=10,
-            pady=3,
-            relief="flat",
-            borderwidth=1,
-        ).pack(side="left", padx=(0, 8))
+        for text, mode in (("All", "all"), ("Diffs", "diffs")):
+            make_chip(mode_row, text, self._diff_mode, mode, self._apply_diff_view).pack(side="left", padx=(0, 6))
+        make_chip(mode_row, "+ Context", self._diff_context, command=self._on_context_toggle).pack(side="left", padx=(0, 8))
 
         make_button(
             diff_toolbar, "Prev Change", self.diff_prev_change,
